@@ -1,4 +1,4 @@
-# 🤖 NOFX - AI交易操作系统-改基于 [23392e7](https://github.com/NoFxAiOS/nofx/commit/23392e7409a438b8a1b89432686d70ae4b679226) V1  副本
+# 🤖 NOFX - AI交易操作系统-改基于 [23392e7](https://github.com/NoFxAiOS/nofx/commit/23392e7409a438b8a1b89432686d70ae4b679226) dddhg11 V1
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![React](https://img.shields.io/badge/React-18+-61DAFB?style=flat&logo=react)](https://reactjs.org/)
