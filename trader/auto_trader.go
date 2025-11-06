@@ -308,63 +308,23 @@ func (at *AutoTrader) autoSyncBalanceIfNeeded() {
 
 	oldBalance := at.initialBalance
 
-	// 防止除以零：如果初始余额无效，直接更新为实际余额
+	// 初始余额禁止自动修改：仅记录并日志告警，不写回 initialBalance 或数据库
 	if oldBalance <= 0 {
-		log.Printf("⚠️ [%s] 初始余额无效 (%.2f)，直接更新为实际余额 %.2f USDT", at.name, oldBalance, actualBalance)
-		at.initialBalance = actualBalance
-		if at.database != nil {
-			type DatabaseUpdater interface {
-				UpdateTraderInitialBalance(userID, id string, newBalance float64) error
-			}
-			if db, ok := at.database.(DatabaseUpdater); ok {
-				if err := db.UpdateTraderInitialBalance(at.userID, at.id, actualBalance); err != nil {
-					log.Printf("❌ [%s] 更新数据库失败: %v", at.name, err)
-				} else {
-					log.Printf("✅ [%s] 已自动同步余额到数据库", at.name)
-				}
-			} else {
-				log.Printf("⚠️ [%s] 数据库类型不支持UpdateTraderInitialBalance接口", at.name)
-			}
-		} else {
-			log.Printf("⚠️ [%s] 数据库引用为空，余额仅在内存中更新", at.name)
-		}
+		log.Printf("⚠️ [%s] 初始余额无效 (%.2f)，检测到实际余额 %.2f USDT，但初始余额禁止自动修改，已忽略同步。",
+			at.name, oldBalance, actualBalance)
 		at.lastBalanceSyncTime = time.Now()
 		return
 	}
 
 	changePercent := ((actualBalance - oldBalance) / oldBalance) * 100
 
-	// 变化超过5%才更新
+	// 变化超过5%时仅记录日志，初始余额保持不变
 	if math.Abs(changePercent) > 5.0 {
-		log.Printf("🔔 [%s] 检测到余额大幅变化: %.2f → %.2f USDT (%.2f%%)",
+		log.Printf("🔔 [%s] 检测到余额大幅变化: %.2f → %.2f USDT (%.2f%%)，但初始余额禁止自动修改，已忽略写回。",
 			at.name, oldBalance, actualBalance, changePercent)
-
-		// 更新内存中的 initialBalance
-		at.initialBalance = actualBalance
-
-		// 更新数据库（需要类型断言）
-		if at.database != nil {
-			// 这里需要根据实际的数据库类型进行类型断言
-			// 由于使用了 interface{}，我们需要在 TraderManager 层面处理更新
-			// 或者在这里进行类型检查
-			type DatabaseUpdater interface {
-				UpdateTraderInitialBalance(userID, id string, newBalance float64) error
-			}
-			if db, ok := at.database.(DatabaseUpdater); ok {
-				err := db.UpdateTraderInitialBalance(at.userID, at.id, actualBalance)
-				if err != nil {
-					log.Printf("❌ [%s] 更新数据库失败: %v", at.name, err)
-				} else {
-					log.Printf("✅ [%s] 已自动同步余额到数据库", at.name)
-				}
-			} else {
-				log.Printf("⚠️ [%s] 数据库类型不支持UpdateTraderInitialBalance接口", at.name)
-			}
-		} else {
-			log.Printf("⚠️ [%s] 数据库引用为空，余额仅在内存中更新", at.name)
-		}
+		// 可选：此处可触发告警或写入审计表，但不修改 initialBalance
 	} else {
-		log.Printf("✓ [%s] 余额变化不大 (%.2f%%)，无需更新", at.name, changePercent)
+		log.Printf("✓ [%s] 余额变化不大 (%.2f%%)，无需更新 initialBalance", at.name, changePercent)
 	}
 
 	at.lastBalanceSyncTime = time.Now()
