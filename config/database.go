@@ -180,16 +180,69 @@ func (d *Database) createTables() error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			symbol TEXT NOT NULL,
 			side TEXT NOT NULL,
+			trader_id TEXT DEFAULT 'default',
 			stop_loss_condition TEXT DEFAULT '',
 			open_time INTEGER DEFAULT 0,
-			is_open INTEGER DEFAULT 1,
-			UNIQUE(symbol, side)
+			is_open INTEGER DEFAULT 1
 		)`,
 	}
 
 	for _, query := range queries {
 		if _, err := d.db.Exec(query); err != nil {
 			return fmt.Errorf("执行SQL失败 [%s]: %w", query, err)
+		}
+	}
+
+	// 迁移旧的 position_meta（若存在旧的 UNIQUE(schema) 且缺少 trader_id）
+	// 如果旧表没有 trader_id 列，则创建新表并迁移数据，保留原有 stop_loss_condition
+	// 这样可以在不丢失数据的情况下新增 trader_id 字段并支持历史记录
+	var colCount int
+	var err error
+	err = d.db.QueryRow("PRAGMA table_info(position_meta)").Scan(&colCount)
+	if err == nil {
+		// 如果查询成功，我们进一步检查是否存在 trader_id 列
+		rows, err := d.db.Query(`PRAGMA table_info(position_meta)`)
+		if err == nil {
+			defer rows.Close()
+			hasTraderID := false
+			for rows.Next() {
+				var cid int
+				var name, ctype string
+				var notnull, dfltValue, pk sql.NullString
+				if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err == nil {
+					if name == "trader_id" {
+						hasTraderID = true
+						break
+					}
+				}
+			}
+			if !hasTraderID {
+				log.Printf("🔄 迁移 position_meta：添加 trader_id 并保留历史记录")
+				// 创建新表
+				_, err = d.db.Exec(`
+					CREATE TABLE IF NOT EXISTS position_meta_new (
+						id INTEGER PRIMARY KEY AUTOINCREMENT,
+						symbol TEXT NOT NULL,
+						side TEXT NOT NULL,
+						trader_id TEXT DEFAULT 'default',
+						stop_loss_condition TEXT DEFAULT '',
+						open_time INTEGER DEFAULT 0,
+						is_open INTEGER DEFAULT 1
+					)
+				`)
+				if err == nil {
+					// 复制旧数据到新表，把 trader_id 设为 'default'
+					_, err = d.db.Exec(`
+						INSERT INTO position_meta_new (symbol, side, stop_loss_condition, open_time, is_open, trader_id)
+						SELECT symbol, side, stop_loss_condition, open_time, is_open, 'default' FROM position_meta
+					`)
+					if err == nil {
+						// 删除旧表并重命名
+						d.db.Exec(`DROP TABLE position_meta`)
+						d.db.Exec(`ALTER TABLE position_meta_new RENAME TO position_meta`)
+					}
+				}
+			}
 		}
 	}
 
@@ -220,7 +273,7 @@ func (d *Database) createTables() error {
 	}
 
 	// 检查是否需要迁移exchanges表的主键结构
-	err := d.migrateExchangesTable()
+	err = d.migrateExchangesTable()
 	if err != nil {
 		log.Printf("⚠️ 迁移exchanges表失败: %v", err)
 	}
@@ -377,55 +430,87 @@ func (d *Database) migrateExchangesTable() error {
 	return nil
 }
 
-// SavePositionStopLoss 保存或更新持仓的止损触发条件（仅用于开仓时保存）
-func (d *Database) SavePositionStopLoss(symbol, side, condition string) error {
-	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(side) == "" {
-		return fmt.Errorf("symbol 或 side 不能为空")
+// PositionStopLossInfo 表示持仓的止损条件记录（包含 trader_id 和 open_time）
+type PositionStopLossInfo struct {
+	ID        int64  `json:"id"`
+	TraderID  string `json:"trader_id"`
+	Condition string `json:"condition"`
+	OpenTime  int64  `json:"open_time"`
+	IsOpen    int    `json:"is_open"`
+}
+
+// SavePositionStopLoss 为一条新的开仓保存止损触发条件，支持多实例历史（会把相同 symbol/side/trader 的旧记录标记为 closed）
+func (d *Database) SavePositionStopLoss(symbol, side, traderID, condition string) error {
+	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(side) == "" || strings.TrimSpace(traderID) == "" {
+		return fmt.Errorf("symbol 或 side 或 traderID 不能为空")
 	}
 
-	// 使用 UPSERT 保证唯一性
-	_, err := d.db.Exec(`
-		INSERT INTO position_meta (symbol, side, stop_loss_condition, open_time, is_open)
-		VALUES (?, ?, ?, ?, 1)
-		ON CONFLICT(symbol, side) DO UPDATE SET
-			stop_loss_condition=excluded.stop_loss_condition,
-			open_time=excluded.open_time,
-			is_open=1
-	`, symbol, side, condition, time.Now().UnixMilli())
+	tx, err := d.db.Begin()
 	if err != nil {
-		return fmt.Errorf("保存止损条件失败: %w", err)
+		return fmt.Errorf("开始事务失败: %w", err)
 	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
+	// 把相同 symbol/side/trader 的旧记录标记为已关闭（is_open=0）
+	if _, err = tx.Exec(`UPDATE position_meta SET is_open = 0 WHERE symbol = ? AND side = ? AND trader_id = ? AND is_open = 1`, symbol, side, traderID); err != nil {
+		return fmt.Errorf("关闭旧记录失败: %w", err)
+	}
+
+	// 插入新的开仓记录（保留历史）
+	res, err := tx.Exec(`INSERT INTO position_meta (symbol, side, trader_id, stop_loss_condition, open_time, is_open) VALUES (?, ?, ?, ?, ?, 1)`, symbol, side, traderID, condition, time.Now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("插入止损条件失败: %w", err)
+	}
+	_ = res
 	return nil
 }
 
-// DeletePositionStopLoss 删除持仓的止损条件（如持仓已平）
-func (d *Database) DeletePositionStopLoss(symbol, side string) error {
+// DeletePositionStopLoss 标记持仓为已关闭（保留历史），优先按 traderID 过滤，如果 traderID 为 "" 则匹配所有 trader
+func (d *Database) DeletePositionStopLoss(symbol, side, traderID string) error {
 	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(side) == "" {
 		return fmt.Errorf("symbol 或 side 不能为空")
 	}
-	_, err := d.db.Exec(`DELETE FROM position_meta WHERE symbol = ? AND side = ?`, symbol, side)
+	if traderID == "" {
+		_, err := d.db.Exec(`UPDATE position_meta SET is_open = 0 WHERE symbol = ? AND side = ?`, symbol, side)
+		if err != nil {
+			return fmt.Errorf("标记关闭止损条件失败: %w", err)
+		}
+		return nil
+	}
+	_, err := d.db.Exec(`UPDATE position_meta SET is_open = 0 WHERE symbol = ? AND side = ? AND trader_id = ?`, symbol, side, traderID)
 	if err != nil {
-		return fmt.Errorf("删除止损条件失败: %w", err)
+		return fmt.Errorf("标记关闭止损条件失败: %w", err)
 	}
 	return nil
 }
 
 // GetOpenPositionStopLosses 获取当前所有开仓的止损条件映射 (key = symbol + "_" + side)
-func (d *Database) GetOpenPositionStopLosses() (map[string]string, error) {
-	rows, err := d.db.Query(`SELECT symbol, side, stop_loss_condition FROM position_meta WHERE is_open = 1`)
+// 返回值为 map[posKey] = []PositionStopLossInfo，支持每个 trader 的多条历史（只返回 is_open = 1 的记录）
+func (d *Database) GetOpenPositionStopLosses() (map[string][]PositionStopLossInfo, error) {
+	rows, err := d.db.Query(`SELECT id, symbol, side, trader_id, stop_loss_condition, open_time, is_open FROM position_meta WHERE is_open = 1`)
 	if err != nil {
 		return nil, fmt.Errorf("查询止损条件失败: %w", err)
 	}
 	defer rows.Close()
 
-	result := make(map[string]string)
+	result := make(map[string][]PositionStopLossInfo)
 	for rows.Next() {
-		var symbol, side, cond string
-		if err := rows.Scan(&symbol, &side, &cond); err != nil {
+		var id int64
+		var symbol, side, traderID, cond string
+		var openTime int64
+		var isOpen int
+		if err := rows.Scan(&id, &symbol, &side, &traderID, &cond, &openTime, &isOpen); err != nil {
 			return nil, fmt.Errorf("扫描行失败: %w", err)
 		}
 		key := symbol + "_" + strings.ToLower(side)
-		result[key] = cond
+		info := PositionStopLossInfo{ID: id, TraderID: traderID, Condition: cond, OpenTime: openTime, IsOpen: isOpen}
+		result[key] = append(result[key], info)
 	}
 	return result, nil
 }

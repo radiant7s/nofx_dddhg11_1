@@ -16,6 +16,14 @@ import (
 	"time"
 )
 
+// absInt64 返回 int64 的绝对值
+func absInt64(a int64) int64 {
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
 type AutoTraderConfig struct {
 	// Trader标识
@@ -555,15 +563,15 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	currentPositionKeys := make(map[string]bool)
 
 	// 从配置数据库读取开仓时保存的止损触发条件（如果可用）
-	var stopLossMap map[string]string
+	var stopLossMap map[string][]config.PositionStopLossInfo
 	if dbObj, ok := at.database.(*config.Database); ok {
 		if m, err := dbObj.GetOpenPositionStopLosses(); err == nil {
 			stopLossMap = m
 		} else {
-			stopLossMap = map[string]string{}
+			stopLossMap = map[string][]config.PositionStopLossInfo{}
 		}
 	} else {
-		stopLossMap = map[string]string{}
+		stopLossMap = map[string][]config.PositionStopLossInfo{}
 	}
 
 	for _, pos := range positions {
@@ -611,8 +619,37 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 
 		// 从数据库回填止损触发条件（仅当开仓时保存过）
 		stopCond := ""
-		if v, ok := stopLossMap[posKey]; ok {
-			stopCond = v
+		// 使用优先级：同 trader 的记录优先；再回退到最近的其他记录（需时间接近）
+		tol := int64(5000) // 容差 5 秒（毫秒）
+		pk := strings.ToLower(posKey)
+		if recs, ok := stopLossMap[pk]; ok && len(recs) > 0 {
+			// 找到同 trader 的最新记录
+			var bestForTrader *config.PositionStopLossInfo
+			var bestOverall *config.PositionStopLossInfo
+			for i := range recs {
+				r := recs[i]
+				if bestOverall == nil || r.OpenTime > bestOverall.OpenTime {
+					tmp := r
+					bestOverall = &tmp
+				}
+				if r.TraderID == at.id {
+					if bestForTrader == nil || r.OpenTime > bestForTrader.OpenTime {
+						tmp := r
+						bestForTrader = &tmp
+					}
+				}
+			}
+			// 优先使用同 trader 的记录（且时间接近），否则使用最近的记录作为回退（需更宽容的时间窗口）
+			if bestForTrader != nil {
+				if absInt64(bestForTrader.OpenTime-updateTime) <= tol {
+					stopCond = bestForTrader.Condition
+				}
+			} else if bestOverall != nil {
+				// 回退使用最近的一条，允许更长的容差（如 60s）
+				if absInt64(bestOverall.OpenTime-updateTime) <= 60000 {
+					stopCond = bestOverall.Condition
+				}
+			}
 		}
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
@@ -792,13 +829,13 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	}
 
 	// 保存开仓时的止损触发条件到配置数据库（仅在提供了条件并且有可用数据库时）
-    if decision.StopLossCondition != "" {
-        if dbObj, ok := at.database.(*config.Database); ok {
-            if err := dbObj.SavePositionStopLoss(decision.Symbol, "long", decision.StopLossCondition); err != nil {
-                log.Printf("  ⚠ 保存止损条件到config.db失败: %v", err)
-            }
-        }
-    }
+	if decision.StopLossCondition != "" {
+		if dbObj, ok := at.database.(*config.Database); ok {
+			if err := dbObj.SavePositionStopLoss(decision.Symbol, "long", at.id, decision.StopLossCondition); err != nil {
+				log.Printf("  ⚠ 保存止损条件到config.db失败: %v", err)
+			}
+		}
+	}
 
 	return nil
 }
@@ -881,13 +918,13 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	}
 
 	// 保存开仓时的止损触发条件到配置数据库
-    if decision.StopLossCondition != "" {
-        if dbObj, ok := at.database.(*config.Database); ok {
-            if err := dbObj.SavePositionStopLoss(decision.Symbol, "short", decision.StopLossCondition); err != nil {
-                log.Printf("  ⚠ 保存止损条件到config.db失败: %v", err)
-            }
-        }
-    }
+	if decision.StopLossCondition != "" {
+		if dbObj, ok := at.database.(*config.Database); ok {
+			if err := dbObj.SavePositionStopLoss(decision.Symbol, "short", at.id, decision.StopLossCondition); err != nil {
+				log.Printf("  ⚠ 保存止损条件到config.db失败: %v", err)
+			}
+		}
+	}
 
 	return nil
 }
@@ -916,9 +953,9 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 
 	log.Printf("  ✓ 平仓成功")
 
-	// 删除数据库中保存的止损条件（持仓已平）
+	// 删除数据库中保存的止损条件（持仓已平）——标记为 closed，按当前 trader id
 	if dbObj, ok := at.database.(*config.Database); ok {
-		if err := dbObj.DeletePositionStopLoss(decision.Symbol, "long"); err != nil {
+		if err := dbObj.DeletePositionStopLoss(decision.Symbol, "long", at.id); err != nil {
 			log.Printf("  ⚠ 删除config.db中止损条件失败: %v", err)
 		}
 	}
@@ -949,9 +986,9 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 
 	log.Printf("  ✓ 平仓成功")
 
-	// 删除数据库中保存的止损条件（持仓已平）
+	// 删除数据库中保存的止损条件（持仓已平）——标记为 closed，按当前 trader id
 	if dbObj, ok := at.database.(*config.Database); ok {
-		if err := dbObj.DeletePositionStopLoss(decision.Symbol, "short"); err != nil {
+		if err := dbObj.DeletePositionStopLoss(decision.Symbol, "short", at.id); err != nil {
 			log.Printf("  ⚠ 删除config.db中止损条件失败: %v", err)
 		}
 	}
