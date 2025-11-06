@@ -174,6 +174,17 @@ func (d *Database) createTables() error {
 			BEGIN
 				UPDATE system_config SET updated_at = CURRENT_TIMESTAMP WHERE key = NEW.key;
 			END`,
+
+		// 持仓元信息表：保存开仓时的止损触发条件，便于在构建 Prompt 时回填
+		`CREATE TABLE IF NOT EXISTS position_meta (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			symbol TEXT NOT NULL,
+			side TEXT NOT NULL,
+			stop_loss_condition TEXT DEFAULT '',
+			open_time INTEGER DEFAULT 0,
+			is_open INTEGER DEFAULT 1,
+			UNIQUE(symbol, side)
+		)`,
 	}
 
 	for _, query := range queries {
@@ -364,6 +375,59 @@ func (d *Database) migrateExchangesTable() error {
 
 	log.Printf("✅ exchanges表迁移完成")
 	return nil
+}
+
+// SavePositionStopLoss 保存或更新持仓的止损触发条件（仅用于开仓时保存）
+func (d *Database) SavePositionStopLoss(symbol, side, condition string) error {
+	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(side) == "" {
+		return fmt.Errorf("symbol 或 side 不能为空")
+	}
+
+	// 使用 UPSERT 保证唯一性
+	_, err := d.db.Exec(`
+		INSERT INTO position_meta (symbol, side, stop_loss_condition, open_time, is_open)
+		VALUES (?, ?, ?, ?, 1)
+		ON CONFLICT(symbol, side) DO UPDATE SET
+			stop_loss_condition=excluded.stop_loss_condition,
+			open_time=excluded.open_time,
+			is_open=1
+	`, symbol, side, condition, time.Now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("保存止损条件失败: %w", err)
+	}
+	return nil
+}
+
+// DeletePositionStopLoss 删除持仓的止损条件（如持仓已平）
+func (d *Database) DeletePositionStopLoss(symbol, side string) error {
+	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(side) == "" {
+		return fmt.Errorf("symbol 或 side 不能为空")
+	}
+	_, err := d.db.Exec(`DELETE FROM position_meta WHERE symbol = ? AND side = ?`, symbol, side)
+	if err != nil {
+		return fmt.Errorf("删除止损条件失败: %w", err)
+	}
+	return nil
+}
+
+// GetOpenPositionStopLosses 获取当前所有开仓的止损条件映射 (key = symbol + "_" + side)
+func (d *Database) GetOpenPositionStopLosses() (map[string]string, error) {
+	rows, err := d.db.Query(`SELECT symbol, side, stop_loss_condition FROM position_meta WHERE is_open = 1`)
+	if err != nil {
+		return nil, fmt.Errorf("查询止损条件失败: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string]string)
+	for rows.Next() {
+		var symbol, side, cond string
+		if err := rows.Scan(&symbol, &side, &cond); err != nil {
+			return nil, fmt.Errorf("扫描行失败: %w", err)
+		}
+		key := symbol + "_" + strings.ToLower(side)
+		result[key] = cond
+	}
+	return result, nil
 }
 
 // User 用户配置

@@ -36,6 +36,7 @@ type PositionInfo struct {
 	LiquidationPrice float64 `json:"liquidation_price"`
 	MarginUsed       float64 `json:"margin_used"`
 	UpdateTime       int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
+	StopLossCondition string  `json:"stop_loss_condition,omitempty"` // 止损触发条件描述（仅保存开仓时的条件）
 }
 
 // AccountInfo 账户信息
@@ -100,6 +101,7 @@ type Decision struct {
 	Confidence      int     `json:"confidence,omitempty"` // 信心度 (0-100)
 	RiskUSD         float64 `json:"risk_usd,omitempty"`   // 最大美元风险
 	Reasoning       string  `json:"reasoning"`
+	StopLossCondition string `json:"stop_loss_condition,omitempty"` // 止损触发条件（开仓时应填写）
 }
 
 // FullDecision AI的完整决策（包含思维链）
@@ -701,6 +703,11 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		}
 		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
 			return fmt.Errorf("止损和止盈必须大于0")
+		}
+
+		// 开仓必须包含明确的止损触发条件，便于保存与后续提示
+		if strings.TrimSpace(d.StopLossCondition) == "" {
+			return fmt.Errorf("开仓必须包含 stop_loss_condition（止损触发条件描述）")
 		}
 
 		// 验证止损止盈的合理性
