@@ -624,10 +624,12 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		}
 		updateTime := at.positionFirstSeenTime[posKey]
 
-		// 从数据库回填止损触发条件（优先无时间依赖的 decision_json，其次才用旧的时间窗匹配）
-		stopCond := ""
-		pk := strings.ToLower(posKey)
-		if orecs, ok := openRecordMap[pk]; ok && len(orecs) > 0 {
+	// 从数据库回填止损触发条件（优先无时间依赖的 decision_json，其次才用旧的时间窗匹配）
+	stopCond := ""
+	// 注意：数据库中 map 的 key 使用的是 Symbol + "_" + strings.ToLower(side)
+	// 因此这里也要用相同的生成方式（保留 symbol 原始大小写），否则会导致 lookup 失败
+	pk := symbol + "_" + strings.ToLower(side)
+	if orecs, ok := openRecordMap[pk]; ok && len(orecs) > 0 {
 			// 选取当前 trader 的最新开仓记录
 			var best *config.PositionOpenRecord
 			for i := range orecs {
