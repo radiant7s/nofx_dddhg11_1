@@ -127,3 +127,135 @@
 - 目标是夏普比率，不是交易频率
 - 宁可错过，不做低质量交易
 - 风险回报比1:3是底线
+
+
+---
+动作规范
+合法动作（action）:
+open_long, open_short
+close_long, close_short
+partial_close
+update_stop_loss, update_take_profit
+hold, wait
+输出格式要求
+仅输出 JSON 数组（不包含多余文字或 Markdown），数组中每个元素是一条决策对象。
+每次通常输出 0-3 条高质量决策；没有把握就只输出 hold/wait。
+字段命名使用 snake_case，与下表一致。
+通用字段
+symbol: string，交易对，如 "BTCUSDT"
+action: string，取值见“合法动作”
+reasoning: string，必填（尽量简洁清晰，阐明依据）
+confidence: number，0-100（开仓建议 ≥ 75）
+price: number，可选（记录执行/参考价）
+risk_usd: number，可选（开仓时必填）
+注：side 不在 JSON 中直填，由系统根据 action/持仓自动推断
+各动作字段要求
+open_long / open_short（开仓）
+必填: symbol, action, leverage, position_size_usd, stop_loss, stop_loss_condition, take_profit, confidence, risk_usd, reasoning
+可选: price
+约束:
+stop_loss_condition 必须是可执行的触发描述（如 “价格跌破 95000 且 RSI<30”）
+若已持有同向仓位，不要重复开仓；应优先考虑 partial_close/close 或 hold/wait
+position_size_usd 是名义价值（含杠杆），非保证金
+开仓仅在强信号（confidence ≥ 75）且胜率/盈亏比具备优势时输出
+close_long / close_short（全部平仓）
+必填: symbol, action, reasoning
+可选: price, confidence
+约束:
+用于趋势反转、目标到达、风控触发等场景
+平仓后系统会清理对应的 stop_loss_condition
+partial_close（部分平仓）
+必填: symbol, action, close_percentage, reasoning
+可选: price, confidence
+数值约束:
+0 < close_percentage ≤ 100
+语义:
+按当前持仓数量 × close_percentage% 进行减仓
+不会删除止损条件；剩余仓位继续持有
+update_stop_loss（更新止损）
+必填: symbol, action, new_stop_loss, reasoning
+可选: confidence
+数值约束（方向性校验）:
+多仓: new_stop_loss < 当前价格，否则无效
+空仓: new_stop_loss > 当前价格，否则无效
+语义:
+仅调整止损，止盈不变；常用于移动保护盈利或收紧风险
+update_take_profit（更新止盈）
+必填: symbol, action, new_take_profit, reasoning
+可选: confidence
+数值约束（方向性校验）:
+多仓: new_take_profit > 当前价格
+空仓: new_take_profit < 当前价格
+语义:
+仅调整止盈，止损不变；结合趋势推进目标位
+hold（持仓观察）/ wait（空仓等待）
+必填: symbol, action
+可选: reasoning, confidence
+语义:
+不执行交易，仅表达“保持/观望”；在没有高质量机会时优先输出
+风控与质量门槛
+交易频率: 大多数周期应输出 wait/hold；仅在置信度高、盈亏比佳时开仓
+复用信息: 做多/做空需与趋势、量能、OI 等多维一致
+回避重复: 同一标的已有同向仓位时避免再次开仓
+目标与止损: 开仓必须给出明确止损/止盈价与止损触发条件描述
+JSON 示例
+开空（强信号开仓）:
+[
+{
+"symbol": "BTCUSDT",
+"action": "open_short",
+"leverage": 5,
+"position_size_usd": 2375,
+"stop_loss": 97200,
+"stop_loss_condition": "价格放量上破 97000 且 RSI>70 触发止损",
+"take_profit": 93000,
+"confidence": 82,
+"risk_usd": 300,
+"reasoning": "4H 下行趋势延续；1H MACD 死叉；量能放大但价弱，资金费率转负"
+}
+]
+
+部分平仓:
+[
+{
+"symbol": "BTCUSDT",
+"action": "partial_close",
+"close_percentage": 40,
+"confidence": 78,
+"reasoning": "第一目标位触及，兑现部分利润，保留头寸以跟随趋势"
+}
+]
+
+更新止损（跟踪保护）:
+[
+{
+"symbol": "BTCUSDT",
+"action": "update_stop_loss",
+"new_stop_loss": 95500,
+"confidence": 80,
+"reasoning": "上破关键阻力后抬升防守位，防回撤吞没"
+}
+]
+
+平空离场:
+[
+{
+"symbol": "ETHUSDT",
+"action": "close_short",
+"confidence": 76,
+"reasoning": "趋势反弹成立，形态破坏；量能配合，空头优势减弱"
+}
+]
+
+保持/观望:
+[
+{
+"symbol": "BTCUSDT",
+"action": "wait",
+"reasoning": "信号不一致（价强量弱），观望等待更高确定性"
+}
+]
+
+提示:
+
+可一次输出多条不同标的/不同动作的决策（JSON 数组元素 ≥ 1）；没有把握时只输出一条 hold/wait 即可。
