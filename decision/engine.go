@@ -315,7 +315,15 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 		accountEquity*0.8, accountEquity*1.5, accountEquity*5, accountEquity*10))
 	sb.WriteString(fmt.Sprintf("4. 杠杆限制: **山寨币最大%dx杠杆** | **BTC/ETH最大%dx杠杆** (⚠️ 严格执行，不可超过)\n", altcoinLeverage, btcEthLeverage))
 	sb.WriteString("5. 保证金: 总使用率 ≤ 90%\n")
-	sb.WriteString("6. 开仓金额: BTC/ETH建议 **≥60 USDT**  山寨建议 **≥15 USDT**(交易所最小名义价值 10 USDT + 安全边际)\n\n")
+	
+	// 🔧 根据账户规模动态调整开仓金额建议
+	if accountEquity < 100 {
+		sb.WriteString("6. 开仓金额: **小资金账户特殊规则** - BTC/ETH建议 **≥25 USDT** | 山寨建议 **≥12 USDT** (优先选择价格较低的币种)\n\n")
+	} else if accountEquity < 500 {
+		sb.WriteString("6. 开仓金额: BTC/ETH建议 **≥35 USDT** | 山寨建议 **≥15 USDT** (交易所最小名义价值要求)\n\n")
+	} else {
+		sb.WriteString("6. 开仓金额: BTC/ETH建议 **≥60 USDT** | 山寨建议 **≥15 USDT** (交易所最小名义价值要求)\n\n")
+	}
 
 	// 3. 输出格式 - 动态生成
 	sb.WriteString("#输出格式\n\n")
@@ -352,13 +360,21 @@ func buildUserPrompt(ctx *Context) string {
 	}
 
 	// 账户
-	sb.WriteString(fmt.Sprintf("账户: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n\n",
+	sb.WriteString(fmt.Sprintf("账户: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n",
 		ctx.Account.TotalEquity,
 		ctx.Account.AvailableBalance,
 		(ctx.Account.AvailableBalance/ctx.Account.TotalEquity)*100,
 		ctx.Account.TotalPnLPct,
 		ctx.Account.MarginUsedPct,
 		ctx.Account.PositionCount))
+
+	// 🔧 小资金账户提醒
+	if ctx.Account.TotalEquity < 100 {
+		sb.WriteString("⚠️ **小资金账户模式**: 建议优先选择价格较低的山寨币交易，BTC/ETH最小开仓25 USDT\n")
+	} else if ctx.Account.TotalEquity < 500 {
+		sb.WriteString("💡 **中等资金账户**: BTC/ETH最小开仓35 USDT，可适当参与主流币交易\n")
+	}
+	sb.WriteString("\n")
 
 	// 持仓（完整市场数据）
 	if len(ctx.Positions) > 0 {
@@ -702,11 +718,24 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		// ✅ 验证最小开仓金额（防止数量格式化为 0 的错误）
 		// Binance 最小名义价值 10 USDT + 安全边际
 		const minPositionSizeGeneral = 12.0   // 10 + 20% 安全边际
-		const minPositionSizeBTCETH = 60.0    // BTC/ETH 因价格高和精度限制需要更大金额（更灵活）
+		
+		// 🔧 动态调整 BTC/ETH 最小开仓金额：小资金账户使用更宽松的限制
+		minPositionSizeBTCETH := 60.0  // 默认60 USDT
+		if accountEquity < 100 {       // 小资金账户（<100 USDT）
+			minPositionSizeBTCETH = 25.0  // 降低到25 USDT
+		} else if accountEquity < 500 { // 中等资金账户（<500 USDT）
+			minPositionSizeBTCETH = 35.0  // 降低到35 USDT
+		}
 
 		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
 			if d.PositionSizeUSD < minPositionSizeBTCETH {
-				return fmt.Errorf("%s 开仓金额过小(%.2f USDT)，必须≥%.2f USDT（因价格高且精度限制，避免数量四舍五入为0）", d.Symbol, d.PositionSizeUSD, minPositionSizeBTCETH)
+				accountTip := ""
+				if accountEquity < 100 {
+					accountTip = "（小资金账户已降低至25 USDT）"
+				} else if accountEquity < 500 {
+					accountTip = "（中等资金账户已降低至35 USDT）"
+				}
+				return fmt.Errorf("%s 开仓金额过小(%.2f USDT)，必须≥%.2f USDT%s（因价格高且精度限制，避免数量四舍五入为0）", d.Symbol, d.PositionSizeUSD, minPositionSizeBTCETH, accountTip)
 			}
 		} else {
 			if d.PositionSizeUSD < minPositionSizeGeneral {
