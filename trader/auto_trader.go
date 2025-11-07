@@ -562,16 +562,23 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	// 当前持仓的key集合（用于清理已平仓的记录）
 	currentPositionKeys := make(map[string]bool)
 
-	// 从配置数据库读取开仓时保存的止损触发条件（如果可用）
+	// 从配置数据库读取开仓时保存的止损触发条件与开仓决策JSON（如果可用）
 	var stopLossMap map[string][]config.PositionStopLossInfo
+	var openRecordMap map[string][]config.PositionOpenRecord
 	if dbObj, ok := at.database.(*config.Database); ok {
 		if m, err := dbObj.GetOpenPositionStopLosses(); err == nil {
 			stopLossMap = m
 		} else {
 			stopLossMap = map[string][]config.PositionStopLossInfo{}
 		}
+		if m2, err := dbObj.GetOpenPositionOpenRecords(); err == nil {
+			openRecordMap = m2
+		} else {
+			openRecordMap = map[string][]config.PositionOpenRecord{}
+		}
 	} else {
 		stopLossMap = map[string][]config.PositionStopLossInfo{}
+		openRecordMap = map[string][]config.PositionOpenRecord{}
 	}
 
 	for _, pos := range positions {
@@ -617,37 +624,67 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		}
 		updateTime := at.positionFirstSeenTime[posKey]
 
-		// 从数据库回填止损触发条件（仅当开仓时保存过）
+		// 从数据库回填止损触发条件（优先无时间依赖的 decision_json，其次才用旧的时间窗匹配）
 		stopCond := ""
-		// 使用优先级：同 trader 的记录优先；再回退到最近的其他记录（需时间接近）
-		tol := int64(5000) // 容差 5 秒（毫秒）
 		pk := strings.ToLower(posKey)
-		if recs, ok := stopLossMap[pk]; ok && len(recs) > 0 {
-			// 找到同 trader 的最新记录
-			var bestForTrader *config.PositionStopLossInfo
-			var bestOverall *config.PositionStopLossInfo
-			for i := range recs {
-				r := recs[i]
-				if bestOverall == nil || r.OpenTime > bestOverall.OpenTime {
-					tmp := r
-					bestOverall = &tmp
+		if orecs, ok := openRecordMap[pk]; ok && len(orecs) > 0 {
+			// 选取当前 trader 的最新开仓记录
+			var best *config.PositionOpenRecord
+			for i := range orecs {
+				r := orecs[i]
+				if r.TraderID != at.id {
+					continue
 				}
-				if r.TraderID == at.id {
-					if bestForTrader == nil || r.OpenTime > bestForTrader.OpenTime {
-						tmp := r
-						bestForTrader = &tmp
-					}
+				if best == nil || r.OpenTime > best.OpenTime {
+					tmp := r
+					best = &tmp
 				}
 			}
-			// 优先使用同 trader 的记录（且时间接近），否则使用最近的记录作为回退（需更宽容的时间窗口）
-			if bestForTrader != nil {
-				if absInt64(bestForTrader.OpenTime-updateTime) <= tol {
-					stopCond = bestForTrader.Condition
+			if best != nil {
+				// 先尝试解析 decision_json 以获得 stop_loss_condition（独立于价格更新）
+				if strings.TrimSpace(best.DecisionJSON) != "" {
+					var dj decision.Decision
+					if err := json.Unmarshal([]byte(best.DecisionJSON), &dj); err == nil {
+						if strings.TrimSpace(dj.StopLossCondition) != "" {
+							stopCond = dj.StopLossCondition
+						}
+					} else {
+						log.Printf("⚠️ 解析 decision_json 失败: %v", err)
+					}
 				}
-			} else if bestOverall != nil {
-				// 回退使用最近的一条，允许更长的容差（如 60s）
-				if absInt64(bestOverall.OpenTime-updateTime) <= 60000 {
-					stopCond = bestOverall.Condition
+				// 若 decision_json 未给出，回退到记录中的 stop_loss_condition 文本
+				if stopCond == "" && strings.TrimSpace(best.StopLossCondition) != "" {
+					stopCond = best.StopLossCondition
+				}
+			}
+		}
+		// 仍未找到则回退到旧的时间容差匹配逻辑（兼容历史数据）
+		if stopCond == "" {
+			tol := int64(5000) // 容差 5 秒（毫秒）
+			if recs, ok := stopLossMap[pk]; ok && len(recs) > 0 {
+				var bestForTrader *config.PositionStopLossInfo
+				var bestOverall *config.PositionStopLossInfo
+				for i := range recs {
+					r := recs[i]
+					if bestOverall == nil || r.OpenTime > bestOverall.OpenTime {
+						tmp := r
+						bestOverall = &tmp
+					}
+					if r.TraderID == at.id {
+						if bestForTrader == nil || r.OpenTime > bestForTrader.OpenTime {
+							tmp := r
+							bestForTrader = &tmp
+						}
+					}
+				}
+				if bestForTrader != nil {
+					if absInt64(bestForTrader.OpenTime-updateTime) <= tol {
+						stopCond = bestForTrader.Condition
+					}
+				} else if bestOverall != nil {
+					if absInt64(bestOverall.OpenTime-updateTime) <= 60000 {
+						stopCond = bestOverall.Condition
+					}
 				}
 			}
 		}
@@ -828,12 +865,34 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		log.Printf("  ⚠ 设置止盈失败: %v", err)
 	}
 
-	// 保存开仓时的止损触发条件到配置数据库（仅在提供了条件并且有可用数据库时）
-	if decision.StopLossCondition != "" {
-		if dbObj, ok := at.database.(*config.Database); ok {
+	// 保存开仓时的止损触发条件与完整执行决策JSON到配置数据库（仅在有可用数据库时）
+	if dbObj, ok := at.database.(*config.Database); ok {
+		// 1) 仅在提供了条件时保存止损条件文本（与价格独立）
+		if strings.TrimSpace(decision.StopLossCondition) != "" {
 			if err := dbObj.SavePositionStopLoss(decision.Symbol, "long", at.id, decision.StopLossCondition); err != nil {
 				log.Printf("  ⚠ 保存止损条件到config.db失败: %v", err)
 			}
+		}
+
+		// 2) 保存此次实际执行的单条决策JSON与开仓主订单ID（用于无时间依赖的回填）
+		//    这里直接序列化当前决策对象（单条），便于后续解析 stop_loss_condition 等字段
+		execJSONBytes, _ := json.Marshal(decision)
+		orderIDStr := ""
+		switch v := order["orderId"].(type) {
+		case int64:
+			orderIDStr = fmt.Sprintf("%d", v)
+		case int:
+			orderIDStr = fmt.Sprintf("%d", v)
+		case float64:
+			// 有些SDK可能将ID解析为float64
+			orderIDStr = fmt.Sprintf("%.0f", v)
+		case string:
+			orderIDStr = v
+		default:
+			orderIDStr = fmt.Sprintf("%v", order["orderId"]) // 兜底
+		}
+		if err := dbObj.SavePositionOpenDecision(decision.Symbol, "long", at.id, string(execJSONBytes), orderIDStr); err != nil {
+			log.Printf("  ⚠ 保存开仓决策JSON失败: %v", err)
 		}
 	}
 
@@ -917,12 +976,32 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		log.Printf("  ⚠ 设置止盈失败: %v", err)
 	}
 
-	// 保存开仓时的止损触发条件到配置数据库
-	if decision.StopLossCondition != "" {
-		if dbObj, ok := at.database.(*config.Database); ok {
+	// 保存开仓时的止损触发条件与完整执行决策JSON到配置数据库
+	if dbObj, ok := at.database.(*config.Database); ok {
+		// 1) 仅在提供了条件时保存止损条件文本（与价格独立）
+		if strings.TrimSpace(decision.StopLossCondition) != "" {
 			if err := dbObj.SavePositionStopLoss(decision.Symbol, "short", at.id, decision.StopLossCondition); err != nil {
 				log.Printf("  ⚠ 保存止损条件到config.db失败: %v", err)
 			}
+		}
+
+		// 2) 保存此次实际执行的单条决策JSON与开仓主订单ID
+		execJSONBytes, _ := json.Marshal(decision)
+		orderIDStr := ""
+		switch v := order["orderId"].(type) {
+		case int64:
+			orderIDStr = fmt.Sprintf("%d", v)
+		case int:
+			orderIDStr = fmt.Sprintf("%d", v)
+		case float64:
+			orderIDStr = fmt.Sprintf("%.0f", v)
+		case string:
+			orderIDStr = v
+		default:
+			orderIDStr = fmt.Sprintf("%v", order["orderId"]) // 兜底
+		}
+		if err := dbObj.SavePositionOpenDecision(decision.Symbol, "short", at.id, string(execJSONBytes), orderIDStr); err != nil {
+			log.Printf("  ⚠ 保存开仓决策JSON失败: %v", err)
 		}
 	}
 
@@ -1040,8 +1119,8 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 		return fmt.Errorf("空单止损必须高于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, decision.NewStopLoss)
 	}
 
-	// 取消旧的止损单（避免多个止损单共存）
-	if err := at.trader.CancelStopOrders(decision.Symbol); err != nil {
+	// 取消旧的止损单（仅取消止损，不影响止盈）
+	if err := at.trader.CancelStopLossOrders(decision.Symbol); err != nil {
 		log.Printf("  ⚠ 取消旧止损单失败: %v", err)
 		// 不中断执行，继续设置新止损
 	}
@@ -1102,8 +1181,8 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 		return fmt.Errorf("空单止盈必须低于当前价格 (当前: %.2f, 新止盈: %.2f)", marketData.CurrentPrice, decision.NewTakeProfit)
 	}
 
-	// 取消旧的止盈单（避免多个止盈单共存）
-	if err := at.trader.CancelStopOrders(decision.Symbol); err != nil {
+	// 取消旧的止盈单（仅取消止盈，不影响止损）
+	if err := at.trader.CancelTakeProfitOrders(decision.Symbol); err != nil {
 		log.Printf("  ⚠ 取消旧止盈单失败: %v", err)
 		// 不中断执行，继续设置新止盈
 	}

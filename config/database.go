@@ -182,6 +182,8 @@ func (d *Database) createTables() error {
 			side TEXT NOT NULL,
 			trader_id TEXT DEFAULT 'default',
 			stop_loss_condition TEXT DEFAULT '',
+			decision_json TEXT DEFAULT '',
+			order_id TEXT DEFAULT '',
 			open_time INTEGER DEFAULT 0,
 			is_open INTEGER DEFAULT 1
 		)`,
@@ -226,6 +228,8 @@ func (d *Database) createTables() error {
 						side TEXT NOT NULL,
 						trader_id TEXT DEFAULT 'default',
 						stop_loss_condition TEXT DEFAULT '',
+						decision_json TEXT DEFAULT '',
+						order_id TEXT DEFAULT '',
 						open_time INTEGER DEFAULT 0,
 						is_open INTEGER DEFAULT 1
 					)
@@ -233,8 +237,8 @@ func (d *Database) createTables() error {
 				if err == nil {
 					// 复制旧数据到新表，把 trader_id 设为 'default'
 					_, err = d.db.Exec(`
-						INSERT INTO position_meta_new (symbol, side, stop_loss_condition, open_time, is_open, trader_id)
-						SELECT symbol, side, stop_loss_condition, open_time, is_open, 'default' FROM position_meta
+						INSERT INTO position_meta_new (symbol, side, stop_loss_condition, decision_json, order_id, open_time, is_open, trader_id)
+						SELECT symbol, side, stop_loss_condition, '' as decision_json, '' as order_id, open_time, is_open, 'default' FROM position_meta
 					`)
 					if err == nil {
 						// 删除旧表并重命名
@@ -265,6 +269,8 @@ func (d *Database) createTables() error {
 		`ALTER TABLE traders ADD COLUMN system_prompt_template TEXT DEFAULT 'default'`, // 系统提示词模板名称
 		`ALTER TABLE ai_models ADD COLUMN custom_api_url TEXT DEFAULT ''`,              // 自定义API地址
 		`ALTER TABLE ai_models ADD COLUMN custom_model_name TEXT DEFAULT ''`,           // 自定义模型名称
+		`ALTER TABLE position_meta ADD COLUMN decision_json TEXT DEFAULT ''`,           // 开仓时的完整执行决策 JSON（单条）
+		`ALTER TABLE position_meta ADD COLUMN order_id TEXT DEFAULT ''`,                // 开仓主订单ID（可选）
 	}
 
 	for _, query := range alterQueries {
@@ -439,6 +445,19 @@ type PositionStopLossInfo struct {
 	IsOpen    int    `json:"is_open"`
 }
 
+// PositionOpenRecord 表示一条开仓元记录，包含决策JSON与订单ID等
+type PositionOpenRecord struct {
+	ID                int64  `json:"id"`
+	Symbol            string `json:"symbol"`
+	Side              string `json:"side"`
+	TraderID          string `json:"trader_id"`
+	StopLossCondition string `json:"stop_loss_condition"`
+	DecisionJSON      string `json:"decision_json"`
+	OrderID           string `json:"order_id"`
+	OpenTime          int64  `json:"open_time"`
+	IsOpen            int    `json:"is_open"`
+}
+
 // SavePositionStopLoss 为一条新的开仓保存止损触发条件，支持多实例历史（会把相同 symbol/side/trader 的旧记录标记为 closed）
 func (d *Database) SavePositionStopLoss(symbol, side, traderID, condition string) error {
 	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(side) == "" || strings.TrimSpace(traderID) == "" {
@@ -511,6 +530,83 @@ func (d *Database) GetOpenPositionStopLosses() (map[string][]PositionStopLossInf
 		key := symbol + "_" + strings.ToLower(side)
 		info := PositionStopLossInfo{ID: id, TraderID: traderID, Condition: cond, OpenTime: openTime, IsOpen: isOpen}
 		result[key] = append(result[key], info)
+	}
+	return result, nil
+}
+
+// SavePositionOpenDecision 将已执行的单条决策 JSON 以及可选的开仓主订单ID写入当前开仓记录
+// 行为：
+// 1) 若存在 symbol/side/trader 的 is_open=1 记录，则更新该记录的 decision_json/order_id
+// 2) 若不存在，则插入一条新记录（不包含止损条件）以便完整记录决策
+func (d *Database) SavePositionOpenDecision(symbol, side, traderID, decisionJSON, orderID string) error {
+	if strings.TrimSpace(symbol) == "" || strings.TrimSpace(side) == "" || strings.TrimSpace(traderID) == "" {
+		return fmt.Errorf("symbol 或 side 或 traderID 不能为空")
+	}
+
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始事务失败: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		} else {
+			_ = tx.Commit()
+		}
+	}()
+
+	// 查找最新的开仓记录
+	var id int64
+	err = tx.QueryRow(`
+		SELECT id FROM position_meta 
+		WHERE symbol = ? AND side = ? AND trader_id = ? AND is_open = 1
+		ORDER BY open_time DESC, id DESC LIMIT 1
+	`, symbol, side, traderID).Scan(&id)
+
+	if err == nil {
+		// 更新已有开仓记录
+		if _, err = tx.Exec(`UPDATE position_meta SET decision_json = ?, order_id = ? WHERE id = ?`, decisionJSON, orderID, id); err != nil {
+			return fmt.Errorf("更新决策JSON失败: %w", err)
+		}
+		return nil
+	}
+
+	if err != sql.ErrNoRows {
+		// 其他错误
+		return fmt.Errorf("查询开仓记录失败: %w", err)
+	}
+
+	// 不存在开仓记录，插入一条新记录（stop_loss_condition 留空，保留历史）
+	if _, err = tx.Exec(`
+		INSERT INTO position_meta (symbol, side, trader_id, stop_loss_condition, decision_json, order_id, open_time, is_open)
+		VALUES (?, ?, ?, '', ?, ?, ?, 1)
+	`, symbol, side, traderID, decisionJSON, orderID, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("插入决策JSON失败: %w", err)
+	}
+	return nil
+}
+
+// GetOpenPositionOpenRecords 读取当前所有开仓的元记录（包含决策JSON与订单ID）
+// 返回 map[posKey] = []PositionOpenRecord，其中 posKey = symbol + "_" + strings.ToLower(side)
+func (d *Database) GetOpenPositionOpenRecords() (map[string][]PositionOpenRecord, error) {
+	rows, err := d.db.Query(`
+		SELECT id, symbol, side, trader_id, stop_loss_condition,
+			   COALESCE(decision_json, ''), COALESCE(order_id, ''), open_time, is_open
+		FROM position_meta WHERE is_open = 1
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("查询开仓记录失败: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]PositionOpenRecord)
+	for rows.Next() {
+		var r PositionOpenRecord
+		if err := rows.Scan(&r.ID, &r.Symbol, &r.Side, &r.TraderID, &r.StopLossCondition, &r.DecisionJSON, &r.OrderID, &r.OpenTime, &r.IsOpen); err != nil {
+			return nil, fmt.Errorf("扫描开仓记录失败: %w", err)
+		}
+		key := r.Symbol + "_" + strings.ToLower(r.Side)
+		result[key] = append(result[key], r)
 	}
 	return result, nil
 }
