@@ -400,9 +400,21 @@ func buildUserPrompt(ctx *Context) string {
 				stopCondText = fmt.Sprintf(" | 止损条件: %s", pos.StopLossCondition)
 			}
 
+			// 根据需求：盈亏改为 未实现盈亏/(仓位价值/杠杠)*100
+			// 仓位价值 = 数量 * 标记价
+			pnlPercent := 0.0
+			positionValue := pos.Quantity * pos.MarkPrice
+			Leverag:= float64(pos.Leverage)
+			if positionValue != 0 {
+				denom := positionValue / Leverag
+				if denom != 0 {
+					pnlPercent = pos.UnrealizedPnL / denom * 100.0
+				}
+			}
+
 			sb.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 盈亏%+.2f%% | 杠杆%dx | 保证金%.0f | 强平价%.4f%s%s\n\n",
 				i+1, pos.Symbol, strings.ToUpper(pos.Side),
-				pos.EntryPrice, pos.MarkPrice, pos.UnrealizedPnLPct,
+				pos.EntryPrice, pos.MarkPrice, pnlPercent,
 				pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration, stopCondText))
 
 			// 使用FormatMarketData输出完整市场数据
