@@ -7,6 +7,7 @@ import (
 	"log"
 	"nofx/config"
 	"nofx/trader"
+	"nofx/pool"
 	"sort"
 	"strconv"
 	"strings"
@@ -210,6 +211,212 @@ func (tm *TraderManager) addTraderFromDB(traderCfg *config.TraderRecord, aiModel
 	if traderCfg.UseCoinPool && coinPoolURL != "" {
 		effectiveCoinPoolURL = coinPoolURL
 		log.Printf("✓ 交易员 %s 启用 COIN POOL 信号源: %s", traderCfg.Name, coinPoolURL)
+	}
+
+	// 如果启用了 Coin Pool，则优先从 Coin Pool / OI Top 拉取并合并候选币种
+	if traderCfg.UseCoinPool && (coinPoolURL != "" || oiTopURL != "") {
+		if coinPoolURL != "" {
+			pool.SetCoinPoolAPI(coinPoolURL)
+		}
+		if oiTopURL != "" {
+			pool.SetOITopAPI(oiTopURL)
+		}
+
+		var mergedSymbols []string
+		if coinPoolURL != "" && oiTopURL != "" {
+			merged, err := pool.GetMergedCoinPool(20)
+			if err != nil {
+				log.Printf("⚠️ 获取合并币种池失败: %v", err)
+			} else {
+				mergedSymbols = merged.AllSymbols
+			}
+		} else if coinPoolURL != "" {
+			syms, err := pool.GetTopRatedCoins(20)
+			if err != nil {
+				log.Printf("⚠️ 获取Coin Pool前N币种失败: %v", err)
+			} else {
+				mergedSymbols = syms
+			}
+		} else if oiTopURL != "" {
+			syms, err := pool.GetOITopSymbols()
+			if err != nil {
+				log.Printf("⚠️ 获取OI Top币种失败: %v", err)
+			} else {
+				mergedSymbols = syms
+			}
+		}
+
+		if len(mergedSymbols) > 0 {
+			unique := make(map[string]bool)
+			var finalList []string
+			for _, s := range mergedSymbols {
+				if s == "" {
+					continue
+				}
+				if !unique[s] {
+					unique[s] = true
+					finalList = append(finalList, s)
+				}
+			}
+			tradingCoins = finalList
+
+			if database != nil {
+				if b, err := json.Marshal(finalList); err == nil {
+					if err2 := database.SetSystemConfig("default_coins", string(b)); err2 != nil {
+						log.Printf("⚠️ 写回系统 default_coins 失败: %v", err2)
+					} else {
+						log.Printf("✓ 已将合并后的 Coin Pool 币种写回系统 default_coins（共%d个）", len(finalList))
+						pool.SetDefaultCoins(finalList)
+					}
+				} else {
+					log.Printf("⚠️ 序列化合并币种列表失败: %v", err)
+				}
+			} else {
+				log.Printf("⚠️ 无法写回系统 default_coins：数据库对象为空")
+			}
+		} else {
+			log.Printf("⚠️ 未从 Coin Pool / OI Top 获取到有效币种，保留原始 tradingCoins 或 defaultCoins")
+		}
+	}
+
+	// 如果启用了 Coin Pool，则优先从 Coin Pool / OI Top 拉取并合并候选币种
+	if traderCfg.UseCoinPool && (coinPoolURL != "" || oiTopURL != "") {
+		if coinPoolURL != "" {
+			pool.SetCoinPoolAPI(coinPoolURL)
+		}
+		if oiTopURL != "" {
+			pool.SetOITopAPI(oiTopURL)
+		}
+
+		var mergedSymbols []string
+		if coinPoolURL != "" && oiTopURL != "" {
+			merged, err := pool.GetMergedCoinPool(20)
+			if err != nil {
+				log.Printf("⚠️ 获取合并币种池失败: %v", err)
+			} else {
+				mergedSymbols = merged.AllSymbols
+			}
+		} else if coinPoolURL != "" {
+			syms, err := pool.GetTopRatedCoins(20)
+			if err != nil {
+				log.Printf("⚠️ 获取Coin Pool前N币种失败: %v", err)
+			} else {
+				mergedSymbols = syms
+			}
+		} else if oiTopURL != "" {
+			syms, err := pool.GetOITopSymbols()
+			if err != nil {
+				log.Printf("⚠️ 获取OI Top币种失败: %v", err)
+			} else {
+				mergedSymbols = syms
+			}
+		}
+
+		if len(mergedSymbols) > 0 {
+			unique := make(map[string]bool)
+			var finalList []string
+			for _, s := range mergedSymbols {
+				if s == "" {
+					continue
+				}
+				if !unique[s] {
+					unique[s] = true
+					finalList = append(finalList, s)
+				}
+			}
+			tradingCoins = finalList
+
+			if database != nil {
+				if b, err := json.Marshal(finalList); err == nil {
+					if err2 := database.SetSystemConfig("default_coins", string(b)); err2 != nil {
+						log.Printf("⚠️ 写回系统 default_coins 失败: %v", err2)
+					} else {
+						log.Printf("✓ 已将合并后的 Coin Pool 币种写回系统 default_coins（共%d个）", len(finalList))
+						pool.SetDefaultCoins(finalList)
+					}
+				} else {
+					log.Printf("⚠️ 序列化合并币种列表失败: %v", err)
+				}
+			} else {
+				log.Printf("⚠️ 无法写回系统 default_coins：数据库对象为空")
+			}
+		} else {
+			log.Printf("⚠️ 未从 Coin Pool / OI Top 获取到有效币种，保留原始 tradingCoins 或 defaultCoins")
+		}
+	}
+
+	// 如果启用了 Coin Pool，则优先从 Coin Pool / OI Top 拉取并合并候选币种
+	if traderCfg.UseCoinPool && (coinPoolURL != "" || oiTopURL != "") {
+		// 将 URL 设置到 pool 包
+		if coinPoolURL != "" {
+			pool.SetCoinPoolAPI(coinPoolURL)
+		}
+		if oiTopURL != "" {
+			pool.SetOITopAPI(oiTopURL)
+		}
+
+		var mergedSymbols []string
+		if coinPoolURL != "" && oiTopURL != "" {
+			// 两者都存在，使用合并逻辑（AI500 + OI Top）
+			merged, err := pool.GetMergedCoinPool(20)
+			if err != nil {
+				log.Printf("⚠️ 获取合并币种池失败: %v", err)
+			} else {
+				mergedSymbols = merged.AllSymbols
+			}
+		} else if coinPoolURL != "" {
+			// 仅 Coin Pool
+			syms, err := pool.GetTopRatedCoins(20)
+			if err != nil {
+				log.Printf("⚠️ 获取Coin Pool前N币种失败: %v", err)
+			} else {
+				mergedSymbols = syms
+			}
+		} else if oiTopURL != "" {
+			// 仅 OI Top
+			syms, err := pool.GetOITopSymbols()
+			if err != nil {
+				log.Printf("⚠️ 获取OI Top币种失败: %v", err)
+			} else {
+				mergedSymbols = syms
+			}
+		}
+
+		// 如果成功获取到结果，则替换 tradingCoins，并将结果写回系统 default_coins（覆盖）
+		if len(mergedSymbols) > 0 {
+			// 去重 & 保持原有格式（pool 已经标准化符号）
+			unique := make(map[string]bool)
+			var finalList []string
+			for _, s := range mergedSymbols {
+				if s == "" {
+					continue
+				}
+				if !unique[s] {
+					unique[s] = true
+					finalList = append(finalList, s)
+				}
+			}
+			tradingCoins = finalList
+
+			// 将合并后的候选币种写回系统默认币种（覆盖）
+			if database != nil {
+				if b, err := json.Marshal(finalList); err == nil {
+					if err2 := database.SetSystemConfig("default_coins", string(b)); err2 != nil {
+						log.Printf("⚠️ 写回系统 default_coins 失败: %v", err2)
+					} else {
+						log.Printf("✓ 已将合并后的 Coin Pool 币种写回系统 default_coins（共%d个）", len(finalList))
+						// 同步到 pool 的默认列表以保证后续 fallback 一致
+						pool.SetDefaultCoins(finalList)
+					}
+				} else {
+					log.Printf("⚠️ 序列化合并币种列表失败: %v", err)
+				}
+			} else {
+				log.Printf("⚠️ 无法写回系统 default_coins：数据库对象为空")
+			}
+		} else {
+			log.Printf("⚠️ 未从 Coin Pool / OI Top 获取到有效币种，保留原始 tradingCoins 或 defaultCoins")
+		}
 	}
 
 	// 构建AutoTraderConfig
