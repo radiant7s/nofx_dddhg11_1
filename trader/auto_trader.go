@@ -1605,12 +1605,15 @@ func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
 			return candidateCoins, nil
 		}
 	} else {
-		// 使用自定义币种列表，但仍尝试获取最新的市场数据
+		// 使用自定义币种列表，永久关闭默认币种列表以确保从API获取最新数据
 		var candidateCoins []decision.CandidateCoin
 		log.Printf("🔎 getCandidateCoins: 使用自定义 tradingCoins (%d): %v", len(at.tradingCoins), at.tradingCoins)
 
-		// 保存原始的UseDefaultCoins设置
-		originalUseDefaultCoins := pool.GetUseDefaultCoins()
+		// 检测到使用自定义币种列表，永久关闭默认币种列表
+		if pool.GetUseDefaultCoins() {
+			log.Printf("🔧 [%s] 检测到使用自定义币种列表，永久关闭默认币种列表设置", at.name)
+			pool.SetUseDefaultCoins(false)
+		}
 
 		// 尝试从币种池API获取最新数据，以便获取评分、价格等信息
 		// 为了获取更多币种数据，我们尝试获取更大的币种池
@@ -1626,16 +1629,6 @@ func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
 		} else {
 			customAPIURL += "?limit=500"
 		}
-
-		// 临时关闭默认币种列表，确保能从API获取数据
-		log.Printf("🔧 [%s] 临时关闭默认币种列表以获取API数据（原设置: %v）", at.name, originalUseDefaultCoins)
-		pool.SetUseDefaultCoins(false)
-
-		// 确保在函数结束前恢复原始设置
-		defer func() {
-			pool.SetUseDefaultCoins(originalUseDefaultCoins)
-			log.Printf("🔄 [%s] 已恢复默认币种列表设置: %v", at.name, originalUseDefaultCoins)
-		}()
 
 		if coinPool, err := pool.GetCoinPoolForTrader(at.config.ID, customAPIURL); err == nil {
 			coinInfoMap = make(map[string]pool.CoinInfo)
