@@ -25,17 +25,17 @@ var (
 
 // PositionInfo 持仓信息
 type PositionInfo struct {
-	Symbol           string  `json:"symbol"`
-	Side             string  `json:"side"` // "long" or "short"
-	EntryPrice       float64 `json:"entry_price"`
-	MarkPrice        float64 `json:"mark_price"`
-	Quantity         float64 `json:"quantity"`
-	Leverage         int     `json:"leverage"`
-	UnrealizedPnL    float64 `json:"unrealized_pnl"`
-	UnrealizedPnLPct float64 `json:"unrealized_pnl_pct"`
-	LiquidationPrice float64 `json:"liquidation_price"`
-	MarginUsed       float64 `json:"margin_used"`
-	UpdateTime       int64   `json:"update_time"` // 持仓更新时间戳（毫秒）
+	Symbol            string  `json:"symbol"`
+	Side              string  `json:"side"` // "long" or "short"
+	EntryPrice        float64 `json:"entry_price"`
+	MarkPrice         float64 `json:"mark_price"`
+	Quantity          float64 `json:"quantity"`
+	Leverage          int     `json:"leverage"`
+	UnrealizedPnL     float64 `json:"unrealized_pnl"`
+	UnrealizedPnLPct  float64 `json:"unrealized_pnl_pct"`
+	LiquidationPrice  float64 `json:"liquidation_price"`
+	MarginUsed        float64 `json:"margin_used"`
+	UpdateTime        int64   `json:"update_time"`                   // 持仓更新时间戳（毫秒）
 	StopLossCondition string  `json:"stop_loss_condition,omitempty"` // 止损触发条件描述（仅保存开仓时的条件）
 }
 
@@ -83,8 +83,8 @@ type Context struct {
 
 // Decision AI的交易决策
 type Decision struct {
-	Symbol          string  `json:"symbol"`
-	Action          string  `json:"action"` // "open_long", "open_short", "close_long", "close_short", "update_stop_loss", "update_take_profit", "partial_close", "hold", "wait"
+	Symbol string `json:"symbol"`
+	Action string `json:"action"` // "open_long", "open_short", "close_long", "close_short", "update_stop_loss", "update_take_profit", "partial_close", "hold", "wait"
 
 	// 开仓参数
 	Leverage        int     `json:"leverage,omitempty"`
@@ -93,15 +93,15 @@ type Decision struct {
 	TakeProfit      float64 `json:"take_profit,omitempty"`
 
 	// 调整参数（新增）
-	NewStopLoss     float64 `json:"new_stop_loss,omitempty"`     // 用于 update_stop_loss
-	NewTakeProfit   float64 `json:"new_take_profit,omitempty"`   // 用于 update_take_profit
-	ClosePercentage float64 `json:"close_percentage,omitempty"`  // 用于 partial_close (0-100)
+	NewStopLoss     float64 `json:"new_stop_loss,omitempty"`    // 用于 update_stop_loss
+	NewTakeProfit   float64 `json:"new_take_profit,omitempty"`  // 用于 update_take_profit
+	ClosePercentage float64 `json:"close_percentage,omitempty"` // 用于 partial_close (0-100)
 
 	// 通用参数
-	Confidence      int     `json:"confidence,omitempty"` // 信心度 (0-100)
-	RiskUSD         float64 `json:"risk_usd,omitempty"`   // 最大美元风险
-	Reasoning       string  `json:"reasoning"`
-	StopLossCondition string `json:"stop_loss_condition,omitempty"` // 止损触发条件（开仓时应填写）
+	Confidence        int     `json:"confidence,omitempty"` // 信心度 (0-100)
+	RiskUSD           float64 `json:"risk_usd,omitempty"`   // 最大美元风险
+	Reasoning         string  `json:"reasoning"`
+	StopLossCondition string  `json:"stop_loss_condition,omitempty"` // 止损触发条件（开仓时应填写）
 }
 
 // FullDecision AI的完整决策（包含思维链）
@@ -315,7 +315,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 		accountEquity*0.8, accountEquity*3, accountEquity*5, accountEquity*10))
 	sb.WriteString(fmt.Sprintf("4. 杠杆限制: **山寨币最大%dx杠杆** | **BTC/ETH最大%dx杠杆** (⚠️ 严格执行，不可超过)\n", altcoinLeverage, btcEthLeverage))
 	sb.WriteString("5. 保证金: 总使用率 ≤ 90%\n")
-	
+
 	// 🔧 根据账户规模动态调整开仓金额建议
 	if accountEquity < 100 {
 		sb.WriteString("6. 开仓金额: BTC/ETH建议 **≥35 USDT** | 山寨建议 **≥15 USDT** (交易所最小名义价值要求) \n\n")
@@ -329,11 +329,16 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("#输出格式\n\n")
 	sb.WriteString("第一步: 思维链（纯文本）\n")
 	sb.WriteString("简洁分析你的思考过程\n\n")
+
+	// 明确提示：禁止把示例数值当作直接开仓建议使用，必须遵守账户级别的硬约束
+	sb.WriteString("# 注意: 以下示例仅为格式说明，不作为具体开仓数值。\\n")
+	sb.WriteString("对于山寨币，单币仓位最大值 = 3 × 账户净值；对于 BTC/ETH，单币仓位最大值 = 10 × 账户净值。AI 必须遵守此约束。\\n\n")
+
 	sb.WriteString("第二步: JSON决策数组\n\n")
 	sb.WriteString("```json\n[\n")
-	// 开仓项添加 stop_loss_condition 字段（止损条件）
-	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"stop_loss_condition\": \"RSI超买突破70触发止损\", \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage, accountEquity*5))
-	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"止盈离场\"}\n")
+	// 示例：使用占位/注释而非根据 accountEquity 直接插入放大数值，避免误导 LLM
+	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": /* 示例占位：请确保 ≤ 10×账户净值 */, \"stop_loss\": 97000, \"stop_loss_condition\": \"RSI超买突破70触发止损\", \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage))
+	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"SOMEALTUSDT\", \"action\": \"open_long\", \"leverage\": %d, \"position_size_usd\": /* 示例占位：山寨币请确保 ≤ 3×账户净值 */, \"stop_loss\": 1.23, \"stop_loss_condition\": \"价格跌破 1.20 且 RSI<30\", \"take_profit\": 1.40, \"confidence\": 80, \"risk_usd\": 20, \"reasoning\": \"维科夫确认+放量突破\"}\n", altcoinLeverage))
 	sb.WriteString("]\n```\n\n")
 	sb.WriteString("字段说明:\n")
 	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
@@ -404,7 +409,7 @@ func buildUserPrompt(ctx *Context) string {
 			// 仓位价值 = 数量 * 标记价
 			pnlPercent := 0.0
 			positionValue := pos.Quantity * pos.MarkPrice
-			Leverag:= float64(pos.Leverage)
+			Leverag := float64(pos.Leverage)
 			if positionValue != 0 {
 				denom := positionValue / Leverag
 				if denom != 0 {
@@ -661,8 +666,37 @@ func compactArrayOpen(s string) string {
 
 // validateDecisions 验证所有决策（需要账户信息和杠杆配置）
 func validateDecisions(decisions []Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
-	for i, decision := range decisions {
-		if err := validateDecision(&decision, accountEquity, btcEthLeverage, altcoinLeverage); err != nil {
+	// 遍历并在必要时对超限的 position_size_usd 自动限幅（clamp），然后再进行严格校验
+	for i := range decisions {
+		d := &decisions[i]
+
+		// 仅对开仓操作进行限幅处理
+		if d.Action == "open_long" || d.Action == "open_short" {
+			maxPositionValue := accountEquity * 3.0 // 默认山寨币上限
+			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
+				maxPositionValue = accountEquity * 10.0 // BTC/ETH上限
+			}
+
+			// 允许 1% 容差以避免浮点误差，匹配 validateDecision 中的逻辑
+			tolerance := maxPositionValue * 0.01
+			if d.PositionSizeUSD > maxPositionValue+tolerance {
+				old := d.PositionSizeUSD
+				// 自动限幅到最大允许值（不含容差）
+				d.PositionSizeUSD = maxPositionValue
+
+				// 在 reason 中追加限幅说明，避免覆盖原有理由
+				note := fmt.Sprintf("（已自动限幅: 原 %.2f → %.2f，因超出允许最大值%.2f）", old, d.PositionSizeUSD, maxPositionValue)
+				if strings.TrimSpace(d.Reasoning) == "" {
+					d.Reasoning = note
+				} else if !strings.Contains(d.Reasoning, "已自动限幅") {
+					d.Reasoning = d.Reasoning + " " + note
+				}
+
+				log.Printf("[validateDecisions] 决策 #%d %s position_size_usd 超限: %.2f -> %.2f (max %.2f)", i+1, d.Symbol, old, d.PositionSizeUSD, maxPositionValue)
+			}
+		}
+
+		if err := validateDecision(d, accountEquity, btcEthLeverage, altcoinLeverage); err != nil {
 			return fmt.Errorf("决策 #%d 验证失败: %w", i+1, err)
 		}
 	}
@@ -713,8 +747,8 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 	// 开仓操作必须提供完整参数
 	if d.Action == "open_long" || d.Action == "open_short" {
 		// 根据币种使用配置的杠杆上限
-	maxLeverage := altcoinLeverage          // 山寨币使用配置的杠杆
-	maxPositionValue := accountEquity * 3.0 // 山寨币最多3倍账户净值
+		maxLeverage := altcoinLeverage          // 山寨币使用配置的杠杆
+		maxPositionValue := accountEquity * 3.0 // 山寨币最多3倍账户净值
 		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
 			maxLeverage = btcEthLeverage          // BTC和ETH使用配置的杠杆
 			maxPositionValue = accountEquity * 10 // BTC/ETH最多10倍账户净值
@@ -729,14 +763,14 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 
 		// ✅ 验证最小开仓金额（防止数量格式化为 0 的错误）
 		// Binance 最小名义价值 10 USDT + 安全边际
-		const minPositionSizeGeneral = 12.0   // 10 + 20% 安全边际
-		
+		const minPositionSizeGeneral = 12.0 // 10 + 20% 安全边际
+
 		// 🔧 动态调整 BTC/ETH 最小开仓金额：小资金账户使用更宽松的限制
-		minPositionSizeBTCETH := 60.0  // 默认60 USDT
-		if accountEquity < 100 {       // 小资金账户（<100 USDT）
-			minPositionSizeBTCETH = 25.0  // 降低到25 USDT
+		minPositionSizeBTCETH := 60.0 // 默认60 USDT
+		if accountEquity < 100 {      // 小资金账户（<100 USDT）
+			minPositionSizeBTCETH = 25.0 // 降低到25 USDT
 		} else if accountEquity < 500 { // 中等资金账户（<500 USDT）
-			minPositionSizeBTCETH = 35.0  // 降低到35 USDT
+			minPositionSizeBTCETH = 35.0 // 降低到35 USDT
 		}
 
 		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
