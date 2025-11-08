@@ -1283,17 +1283,28 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 	positionValue := totalQuantity * markPrice
 
 	// 在执行部分平仓之前检查仓位价值
-	if positionValue < 10.0 {
-		log.Printf("⚠ 仓位价值 %.2f USDT 小于 10 USDT，无法执行部分平仓: %s", positionValue, decision.Symbol)
-		return fmt.Errorf("仓位价值小于10 USDT，无法执行部分平仓")
-	}
+        if positionValue < 10.0 {
+            // 改为直接全平仓（而不是报错），复用完整平仓逻辑与日志
+            log.Printf("  ⚠ 仓位价值 %.2f USDT < 10，改为全平仓而不是部分平仓: %s", positionValue, decision.Symbol)
+            tempDecision := *decision
+            if positionSide == "LONG" {
+                tempDecision.Action = "close_long"
+                actionRecord.Action = "close_long" // 覆盖记录，方便后续统计
+                return at.executeCloseLongWithRecord(&tempDecision, actionRecord)
+            }
+            tempDecision.Action = "close_short"
+            actionRecord.Action = "close_short"
+            return at.executeCloseShortWithRecord(&tempDecision, actionRecord)
+        }
 
-	// 执行平仓
+	// 执行部分平仓
 	var order map[string]interface{}
 	if positionSide == "LONG" {
 		order, err = at.trader.CloseLong(decision.Symbol, closeQuantity)
+		log.Printf("  ↘ 已部分平仓多单: 平 %.4f / %.4f", closeQuantity, totalQuantity)
 	} else {
 		order, err = at.trader.CloseShort(decision.Symbol, closeQuantity)
+		log.Printf("  ↘ 已部分平仓空单: 平 %.4f / %.4f", closeQuantity, totalQuantity)
 	}
 
 	if err != nil {
