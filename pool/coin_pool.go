@@ -83,6 +83,11 @@ func SetUseDefaultCoins(useDefault bool) {
 	coinPoolConfig.UseDefaultCoins = useDefault
 }
 
+// GetUseDefaultCoins 获取当前是否使用默认主流币种的设置
+func GetUseDefaultCoins() bool {
+	return coinPoolConfig.UseDefaultCoins
+}
+
 // SetDefaultCoins 设置默认主流币种列表
 func SetDefaultCoins(coins []string) {
 	if len(coins) > 0 {

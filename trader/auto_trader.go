@@ -1609,14 +1609,50 @@ func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
 		var candidateCoins []decision.CandidateCoin
 		log.Printf("🔎 getCandidateCoins: 使用自定义 tradingCoins (%d): %v", len(at.tradingCoins), at.tradingCoins)
 
+		// 保存原始的UseDefaultCoins设置
+		originalUseDefaultCoins := pool.GetUseDefaultCoins()
+
 		// 尝试从币种池API获取最新数据，以便获取评分、价格等信息
+		// 为了获取更多币种数据，我们尝试获取更大的币种池
 		var coinInfoMap map[string]pool.CoinInfo
-		if coinPool, err := pool.GetCoinPoolForTrader(at.config.ID, at.config.CoinPoolAPIURL); err == nil {
+
+		// 构建用于自定义列表的API URL，增加limit参数以获取更多币种
+		customAPIURL := at.config.CoinPoolAPIURL
+		if strings.Contains(customAPIURL, "limit=") {
+			// 替换现有的limit参数为更大的值
+			customAPIURL = strings.ReplaceAll(customAPIURL, "limit=10", "limit=500")
+		} else if strings.Contains(customAPIURL, "?") {
+			customAPIURL += "&limit=500"
+		} else {
+			customAPIURL += "?limit=500"
+		}
+
+		// 临时关闭默认币种列表，确保能从API获取数据
+		log.Printf("🔧 [%s] 临时关闭默认币种列表以获取API数据（原设置: %v）", at.name, originalUseDefaultCoins)
+		pool.SetUseDefaultCoins(false)
+
+		// 确保在函数结束前恢复原始设置
+		defer func() {
+			pool.SetUseDefaultCoins(originalUseDefaultCoins)
+			log.Printf("🔄 [%s] 已恢复默认币种列表设置: %v", at.name, originalUseDefaultCoins)
+		}()
+
+		if coinPool, err := pool.GetCoinPoolForTrader(at.config.ID, customAPIURL); err == nil {
 			coinInfoMap = make(map[string]pool.CoinInfo)
 			for _, coin := range coinPool {
 				coinInfoMap[normalizeSymbol(coin.Pair)] = coin
 			}
-			log.Printf("📊 [%s] 已获取最新币种池数据用于自定义列表（共%d个币种）", at.name, len(coinPool))
+			log.Printf("📊 [%s] 已获取最新币种池数据用于自定义列表（共%d个币种，使用URL: %s）", at.name, len(coinPool), customAPIURL)
+
+			// 记录有多少自定义币种在API数据中找到了匹配
+			matchCount := 0
+			for _, coin := range at.tradingCoins {
+				symbol := normalizeSymbol(coin)
+				if _, exists := coinInfoMap[symbol]; exists {
+					matchCount++
+				}
+			}
+			log.Printf("🎯 [%s] 自定义币种匹配情况: %d/%d 个币种在API数据中找到", at.name, matchCount, len(at.tradingCoins))
 		} else {
 			log.Printf("⚠️ [%s] 无法获取最新币种池数据，将使用自定义列表但缺少实时信息: %v", at.name, err)
 		}
@@ -1634,6 +1670,8 @@ func (at *AutoTrader) getCandidateCoins() ([]decision.CandidateCoin, error) {
 				// 可以在这里添加评分、价格等信息到 candidateCoin
 				// 注意：这需要 decision.CandidateCoin 结构支持这些字段
 				log.Printf("📈 [%s] 自定义币种 %s 获取到最新数据: 评分=%.2f", at.name, symbol, coinInfo.Score)
+			} else {
+				log.Printf("⚠️ [%s] 自定义币种 %s 在API数据中未找到匹配，将使用默认数据", at.name, symbol)
 			}
 
 			candidateCoins = append(candidateCoins, candidateCoin)
