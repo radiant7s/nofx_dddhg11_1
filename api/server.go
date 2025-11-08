@@ -419,6 +419,22 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 	// 调试日志：确认前端是否正确传入 CoinPool / OI Top 字段
 	log.Printf("🧪 handleCreateTrader 输入检查: use_coin_pool=%v use_oi_top=%v coin_pool_api_url='%s' oi_top_api_url='%s'", req.UseCoinPool, req.UseOITop, req.CoinPoolAPIURL, req.OITopAPIURL)
 
+	// 后端回退逻辑：如果启用信号但未提供 trader 级 URL，则尝试使用用户级信号源配置
+	if (req.UseCoinPool && req.CoinPoolAPIURL == "") || (req.UseOITop && req.OITopAPIURL == "") {
+		if userSource, err := s.database.GetUserSignalSource(userID); err == nil && userSource != nil {
+			if req.UseCoinPool && req.CoinPoolAPIURL == "" && userSource.CoinPoolURL != "" {
+				log.Printf("↩️ CreateTrader Fallback: 使用用户级 coin_pool_url='%s'", userSource.CoinPoolURL)
+				req.CoinPoolAPIURL = userSource.CoinPoolURL
+			}
+			if req.UseOITop && req.OITopAPIURL == "" && userSource.OITopURL != "" {
+				log.Printf("↩️ CreateTrader Fallback: 使用用户级 oi_top_url='%s'", userSource.OITopURL)
+				req.OITopAPIURL = userSource.OITopURL
+			}
+		} else {
+			log.Printf("ℹ️ CreateTrader Fallback: 未找到用户级信号源配置或获取失败: %v", err)
+		}
+	}
+
 	// 校验杠杆值
 	if req.BTCETHLeverage < 0 || req.BTCETHLeverage > 50 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "BTC/ETH杠杆必须在1-50倍之间"})
@@ -676,6 +692,22 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		scanIntervalMinutes = existingTrader.ScanIntervalMinutes // 保持原值
 	} else if scanIntervalMinutes < 3 {
 		scanIntervalMinutes = 3
+	}
+
+	// 后端回退逻辑：如果启用信号但未提供 trader 级 URL，则尝试使用用户级信号源配置
+	if (req.UseCoinPool && req.CoinPoolAPIURL == "") || (req.UseOITop && req.OITopAPIURL == "") {
+		if userSource, err2 := s.database.GetUserSignalSource(userID); err2 == nil && userSource != nil {
+			if req.UseCoinPool && req.CoinPoolAPIURL == "" && userSource.CoinPoolURL != "" {
+				log.Printf("↩️ UpdateTrader Fallback: 使用用户级 coin_pool_url='%s'", userSource.CoinPoolURL)
+				req.CoinPoolAPIURL = userSource.CoinPoolURL
+			}
+			if req.UseOITop && req.OITopAPIURL == "" && userSource.OITopURL != "" {
+				log.Printf("↩️ UpdateTrader Fallback: 使用用户级 oi_top_url='%s'", userSource.OITopURL)
+				req.OITopAPIURL = userSource.OITopURL
+			}
+		} else {
+			log.Printf("ℹ️ UpdateTrader Fallback: 未找到用户级信号源配置或获取失败: %v", err2)
+		}
 	}
 
 	// 更新交易员配置

@@ -117,6 +117,35 @@ export function TraderConfigModal({
     }
   }, [traderData, isEditMode, availableModels, availableExchanges])
 
+  // 预填用户级信号源配置（仅当 trader 级字段为空）
+  useEffect(() => {
+    if (!isOpen) return
+    // 仅当任一字段为空时才请求，避免不必要的调用
+    if (formData.coin_pool_api_url || formData.oi_top_api_url) return
+    const token =
+      localStorage.getItem('auth_token') || localStorage.getItem('token') || ''
+    fetch('/api/user/signal-sources', {
+      headers: token
+        ? {
+            Authorization: `Bearer ${token}`,
+          }
+        : {},
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
+      .then((data) => {
+        setFormData((prev) => ({
+          ...prev,
+          coin_pool_api_url:
+            prev.coin_pool_api_url || data.coin_pool_url || prev.coin_pool_api_url,
+          oi_top_api_url:
+            prev.oi_top_api_url || data.oi_top_url || prev.oi_top_api_url,
+        }))
+      })
+      .catch((err) => {
+        console.warn('获取用户级信号源失败 (可忽略):', err)
+      })
+  }, [isOpen, formData.coin_pool_api_url, formData.oi_top_api_url])
+
   // 获取系统配置中的币种列表
   useEffect(() => {
     const fetchConfig = async () => {
