@@ -21,6 +21,7 @@ nofx_test
 Thumbs.db
 
 # 临时文件
+log/
 *.log
 *.tmp
 *.bak
