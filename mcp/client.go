@@ -188,8 +188,8 @@ func (client *Client) callOnce(systemPrompt, userPrompt string) (string, error) 
 
 	// 如果是 SiliconFlow（通过域名判断，或 Provider 明确），查询账户余额便于日志与后续策略判定
 	if isSiliconFlow(client) {
-		if info, err := fetchSiliconFlowUserInfo(client); err == nil {
-			log.Printf("💰 [MCP] SiliconFlow 账户余额: %s (totalBalance=%s, chargeBalance=%s)", info.Data.Balance, info.Data.TotalBalance, info.Data.ChargeBalance)
+		if info, key, err := fetchSiliconFlowUserInfo(client); err == nil {
+			log.Printf("💰 [MCP] SiliconFlow(%s) 账户余额: %s (totalBalance=%s, chargeBalance=%s)", key, info.Data.Balance, info.Data.TotalBalance, info.Data.ChargeBalance)
 		} else {
 			log.Printf("⚠️  [MCP] 获取 SiliconFlow 余额失败: %v", err)
 		}
@@ -341,36 +341,51 @@ func isSiliconFlow(c *Client) bool {
 }
 
 // fetchSiliconFlowUserInfo 调用 /user/info 获取余额
-func fetchSiliconFlowUserInfo(c *Client) (*siliconFlowUserInfo, error) {
+// 返回值依次为：账户信息、脱敏后的 API Key（用于日志）、错误
+func fetchSiliconFlowUserInfo(c *Client) (*siliconFlowUserInfo, string, error) {
 	// SiliconFlow 基础地址通常为 https://api.siliconflow.cn/v1
 	// 其用户信息接口：GET /user/info （不需要 /v1 前缀再追加）
 	// 若 BaseURL 末尾存在 /v1，需要向上一级取 /user/info；这里直接裁掉末尾的 /v1 以保证兼容。
 	var url = "https://api.siliconflow.cn/v1/user/info"
 
+	// 脱敏后的 API Key 供日志使用
+	maskedKey := maskAPIKey(c.APIKey)
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("创建 SiliconFlow 用户信息请求失败: %w", err)
+		return nil, maskedKey, fmt.Errorf("创建 SiliconFlow 用户信息请求失败: %w", err)
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.APIKey))
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("发送 SiliconFlow 用户信息请求失败: %w", err)
+		return nil, maskedKey, fmt.Errorf("发送 SiliconFlow 用户信息请求失败: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("读取 SiliconFlow 用户信息响应失败: %w", err)
+		return nil, maskedKey, fmt.Errorf("读取 SiliconFlow 用户信息响应失败: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("SiliconFlow 用户信息接口返回非200: %d %s", resp.StatusCode, string(body))
+		return nil, maskedKey, fmt.Errorf("SiliconFlow 用户信息接口返回非200: %d %s", resp.StatusCode, string(body))
 	}
 	var info siliconFlowUserInfo
 	if err := json.Unmarshal(body, &info); err != nil {
-		return nil, fmt.Errorf("解析 SiliconFlow 用户信息 JSON 失败: %w", err)
+		return nil, maskedKey, fmt.Errorf("解析 SiliconFlow 用户信息 JSON 失败: %w", err)
 	}
 	if !info.Status || info.Code != 20000 {
-		return &info, fmt.Errorf("SiliconFlow 用户信息返回异常 code=%d status=%v message=%s", info.Code, info.Status, info.Message)
+		return &info, maskedKey, fmt.Errorf("SiliconFlow 用户信息返回异常 code=%d status=%v message=%s", info.Code, info.Status, info.Message)
 	}
-	return &info, nil
+	return &info, maskedKey, nil
+}
+
+// maskAPIKey 对 API Key 进行简单脱敏，仅保留前后各4位
+func maskAPIKey(key string) string {
+	if len(key) <= 8 {
+		if len(key) == 0 {
+			return "(empty)"
+		}
+		return "****"
+	}
+	return key[:4] + "..." + key[len(key)-4:]
 }
