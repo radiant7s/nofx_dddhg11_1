@@ -375,9 +375,9 @@ func buildUserPrompt(ctx *Context) string {
 
 	// 🔧 小资金账户提醒
 	if ctx.Account.TotalEquity < 100 {
-		sb.WriteString("⚠️ **小资金账户模式**: 建议优先选择价格较低的山寨币交易，BTC/ETH最小开仓25 USDT\n")
+		sb.WriteString("⚠️ **小资金账户模式**: BTC/ETH最小开仓25 USDT\n")
 	} else if ctx.Account.TotalEquity < 500 {
-		sb.WriteString("💡 **中等资金账户**: BTC/ETH最小开仓35 USDT，可适当参与主流币交易\n")
+		sb.WriteString("💡 **中等资金账户**: BTC/ETH最小开仓35 USDT\n")
 	}
 	sb.WriteString("\n")
 
