@@ -1128,6 +1128,21 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 	positionSide := strings.ToUpper(side)
 	positionAmt, _ := targetPosition["positionAmt"].(float64)
 
+	// 计算当前仓位名义价值（用于极小仓位直接全平避免无效止损单）
+	quantityAbs := math.Abs(positionAmt)
+	positionValue := quantityAbs * marketData.CurrentPrice
+	if positionValue < 10.0 {
+		log.Printf("  ⚠ 仓位价值 %.2f USDT 小于 10 USDT，改为直接全平仓而非调整止损: %s", positionValue, decision.Symbol)
+		// 构造临时决策复用现有平仓逻辑（保持日志/清理一致）
+		tempDecision := *decision
+		if positionSide == "LONG" {
+			tempDecision.Action = "close_long"
+			return at.executeCloseLongWithRecord(&tempDecision, actionRecord)
+		}
+		tempDecision.Action = "close_short"
+		return at.executeCloseShortWithRecord(&tempDecision, actionRecord)
+	}
+
 	// 验证新止损价格合理性
 	if positionSide == "LONG" && decision.NewStopLoss >= marketData.CurrentPrice {
 		return fmt.Errorf("多单止损必须低于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, decision.NewStopLoss)
@@ -1143,7 +1158,7 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 	}
 
 	// 调用交易所 API 修改止损
-	quantity := math.Abs(positionAmt)
+	quantity := quantityAbs
 	err = at.trader.SetStopLoss(decision.Symbol, positionSide, quantity, decision.NewStopLoss)
 	if err != nil {
 		return fmt.Errorf("修改止损失败: %w", err)
@@ -1284,12 +1299,28 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 
 	// 在执行部分平仓之前检查仓位价值
 	if positionValue < 10.0 {
-		// 改为直接全平仓（而不是报错），复用完整平仓逻辑与日志
+		// 总仓位价值已经过小：直接全平
 		log.Printf("  ⚠ 仓位价值 %.2f USDT < 10，改为全平仓而不是部分平仓: %s", positionValue, decision.Symbol)
 		tempDecision := *decision
 		if positionSide == "LONG" {
 			tempDecision.Action = "close_long"
-			actionRecord.Action = "close_long" // 覆盖记录，方便后续统计
+			actionRecord.Action = "close_long"
+			return at.executeCloseLongWithRecord(&tempDecision, actionRecord)
+		}
+		tempDecision.Action = "close_short"
+		actionRecord.Action = "close_short"
+		return at.executeCloseShortWithRecord(&tempDecision, actionRecord)
+	}
+
+	// 如果执行部分平仓后剩余仓位价值将低于 10 USDT，也改为直接全平
+	remainingQuantityAfter := totalQuantity - closeQuantity
+	remainingValueAfter := remainingQuantityAfter * markPrice
+	if remainingQuantityAfter > 0 && remainingValueAfter < 10.0 {
+		log.Printf("  ⚠ 部分平仓后剩余价值 %.2f USDT < 10，直接改为全平仓: %s", remainingValueAfter, decision.Symbol)
+		tempDecision := *decision
+		if positionSide == "LONG" {
+			tempDecision.Action = "close_long"
+			actionRecord.Action = "close_long"
 			return at.executeCloseLongWithRecord(&tempDecision, actionRecord)
 		}
 		tempDecision.Action = "close_short"
