@@ -312,7 +312,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("1. 风险回报比: 必须 ≥ 1:3（冒1%风险，赚3%+收益）\n")
 	sb.WriteString("2. 最多持仓: 3个币种（质量>数量）\n")
 	sb.WriteString(fmt.Sprintf("3. 单币仓位: 山寨%.0f-%.0f U | BTC/ETH %.0f-%.0f U\n",
-		accountEquity*0.8, accountEquity*3, accountEquity*5, accountEquity*10))
+		accountEquity*0.8, accountEquity*2, accountEquity*2.5, accountEquity*5))
 	sb.WriteString(fmt.Sprintf("4. 杠杆限制: **山寨币最大%dx杠杆** | **BTC/ETH最大%dx杠杆** (⚠️ 严格执行，不可超过)\n", altcoinLeverage, btcEthLeverage))
 	sb.WriteString("5. 保证金: 总使用率 ≤ 90%\n")
 
@@ -332,13 +332,13 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 
 	// 明确提示：禁止把示例数值当作直接开仓建议使用，必须遵守账户级别的硬约束
 	sb.WriteString("# 注意: 以下示例仅为格式说明，不作为具体开仓数值。\\n")
-	sb.WriteString("对于山寨币，单币仓位最大值 = 3 × 账户净值；对于 BTC/ETH，单币仓位最大值 = 10 × 账户净值。AI 必须遵守此约束。\\n\n")
+	sb.WriteString("对于山寨币，单币仓位最大值 = 2 × 账户净值；对于 BTC/ETH，单币仓位最大值 = 5 × 账户净值。AI 必须遵守此约束。\\n\n")
 
 	sb.WriteString("第二步: JSON决策数组\n\n")
 	sb.WriteString("```json\n[\n")
 	// 示例：使用占位/注释而非根据 accountEquity 直接插入放大数值，避免误导 LLM
-	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": /* 示例占位：请确保 ≤ 10×账户净值 */, \"stop_loss\": 97000, \"stop_loss_condition\": \"RSI超买突破70触发止损\", \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage))
-	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"SOMEALTUSDT\", \"action\": \"open_long\", \"leverage\": %d, \"position_size_usd\": /* 示例占位：山寨币请确保 ≤ 3×账户净值 */, \"stop_loss\": 1.23, \"stop_loss_condition\": \"价格跌破 1.20 且 RSI<30\", \"take_profit\": 1.40, \"confidence\": 80, \"risk_usd\": 20, \"reasoning\": \"维科夫确认+放量突破\"}\n", altcoinLeverage))
+	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": /* 示例占位：请确保 ≤ 5×账户净值 */, \"stop_loss\": 97000, \"stop_loss_condition\": \"RSI超买突破70触发止损\", \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage))
+	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"SOMEALTUSDT\", \"action\": \"open_long\", \"leverage\": %d, \"position_size_usd\": /* 示例占位：山寨币请确保 ≤ 2×账户净值 */, \"stop_loss\": 1.23, \"stop_loss_condition\": \"价格跌破 1.20 且 RSI<30\", \"take_profit\": 1.40, \"confidence\": 80, \"risk_usd\": 20, \"reasoning\": \"维科夫确认+放量突破\"}\n", altcoinLeverage))
 	sb.WriteString("]\n```\n\n")
 	sb.WriteString("字段说明:\n")
 	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
@@ -545,7 +545,7 @@ func extractDecisions(response string) ([]Decision, error) {
 	s = fixMissingQuotes(s)
 
 	// 1) 优先从 ```json 代码块中提取
-	if m := reJSONFence.FindStringSubmatch(s); m != nil && len(m) > 1 {
+	if m := reJSONFence.FindStringSubmatch(s); len(m) > 1 {
 		jsonContent := strings.TrimSpace(m[1])
 		jsonContent = compactArrayOpen(jsonContent) // 把 "[ {" 规整为 "[{"
 		jsonContent = fixMissingQuotes(jsonContent) // 二次修復（防止 regex 提取後還有全角）
@@ -672,9 +672,9 @@ func validateDecisions(decisions []Decision, accountEquity float64, btcEthLevera
 
 		// 仅对开仓操作进行限幅处理
 		if d.Action == "open_long" || d.Action == "open_short" {
-			maxPositionValue := accountEquity * 3.0 // 默认山寨币上限
+			maxPositionValue := accountEquity * 2.0 // 山寨币上限（调整为2x账户净值）
 			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-				maxPositionValue = accountEquity * 10.0 // BTC/ETH上限
+				maxPositionValue = accountEquity * 5.0 // BTC/ETH上限（调整为5x账户净值）
 			}
 
 			// 允许 1% 容差以避免浮点误差，匹配 validateDecision 中的逻辑
@@ -748,10 +748,10 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 	if d.Action == "open_long" || d.Action == "open_short" {
 		// 根据币种使用配置的杠杆上限
 		maxLeverage := altcoinLeverage          // 山寨币使用配置的杠杆
-		maxPositionValue := accountEquity * 3.0 // 山寨币最多3倍账户净值
+		maxPositionValue := accountEquity * 2.0 // 山寨币最多2倍账户净值
 		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-			maxLeverage = btcEthLeverage          // BTC和ETH使用配置的杠杆
-			maxPositionValue = accountEquity * 10 // BTC/ETH最多10倍账户净值
+			maxLeverage = btcEthLeverage         // BTC和ETH使用配置的杠杆
+			maxPositionValue = accountEquity * 5 // BTC/ETH最多5倍账户净值
 		}
 
 		if d.Leverage <= 0 || d.Leverage > maxLeverage {
@@ -793,9 +793,9 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		tolerance := maxPositionValue * 0.01 // 1%容差
 		if d.PositionSizeUSD > maxPositionValue+tolerance {
 			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-				return fmt.Errorf("BTC/ETH单币种仓位价值不能超过%.0f USDT（10倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
+				return fmt.Errorf("BTC/ETH单币种仓位价值不能超过%.0f USDT（5倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
 			} else {
-				return fmt.Errorf("山寨币单币种仓位价值不能超过%.0f USDT（3倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
+				return fmt.Errorf("山寨币单币种仓位价值不能超过%.0f USDT（2倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
 			}
 		}
 		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
