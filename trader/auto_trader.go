@@ -1202,8 +1202,24 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 		// 不中断执行，继续设置新止盈
 	}
 
-	// 调用交易所 API 修改止盈
+	// 计算仓位数量与仓位价值
 	quantity := math.Abs(positionAmt)
+	positionValue := quantity * marketData.CurrentPrice
+
+	// 若仓位价值非常小（<10 USDT），直接执行全平，而不是设置止盈
+	if positionValue < 10.0 {
+		log.Printf("  ⚠ 仓位价值 %.2f USDT 小于 10 USDT，改为直接全平仓而非设置止盈: %s", positionValue, decision.Symbol)
+		// 构造临时决策并调用现有的平仓方法以复用日志/清理逻辑
+		tempDecision := *decision
+		if positionSide == "LONG" {
+			tempDecision.Action = "close_long"
+			return at.executeCloseLongWithRecord(&tempDecision, actionRecord)
+		}
+		tempDecision.Action = "close_short"
+		return at.executeCloseShortWithRecord(&tempDecision, actionRecord)
+	}
+
+	// 调用交易所 API 修改止盈
 	err = at.trader.SetTakeProfit(decision.Symbol, positionSide, quantity, decision.NewTakeProfit)
 	if err != nil {
 		return fmt.Errorf("修改止盈失败: %w", err)
