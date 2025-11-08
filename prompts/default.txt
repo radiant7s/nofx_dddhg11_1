@@ -129,6 +129,10 @@
 - 风险回报比1:3是底线
 
 
+
+---
+重要 当仓位价值小于10时，update_stop_loss（更新止损）update_take_profit（更新止盈）改成 close_long / close_short（全部平仓）  没必要占用开仓位置
+
 ---
 动作规范
 合法动作（action）:
