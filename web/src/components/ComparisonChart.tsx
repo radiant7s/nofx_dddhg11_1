@@ -150,20 +150,41 @@ export function ComparisonChart({ traders }: ComparisonChartProps) {
           })
         }
 
-        // 计算盈亏百分比：从total_pnl和balance计算
-        // 新逻辑：固定基准 = 该交易员最早一条记录推导出的初始资金
-        // 使用 total_equity 与固定初始资金比较，体现整体净值增长百分比
+        // 修正后端批量接口的字段含义：
+        // 后端当前 total_equity 可能是 balance + total_pnl，而 balance 已包含 total_pnl，会重复计算。
+        // 这里将展示用净值统一修正为 actualEquity：
+        // • 若存在 balance 和 total_pnl，且 total_equity ≈ balance + total_pnl，则 actualEquity = balance
+        // • 否则优先使用 total_equity，其次使用 balance
+        const balance = typeof point.balance === 'number' ? point.balance : undefined
+        const totalPnlVal = typeof point.total_pnl === 'number' ? point.total_pnl : undefined
+        const totalEquityRaw = typeof point.total_equity === 'number' ? point.total_equity : undefined
+
+        const approximately = (a: number, b: number, eps = 1e-6) => Math.abs(a - b) <= eps
+        let actualEquity = totalEquityRaw
+        if (
+          balance !== undefined &&
+          totalPnlVal !== undefined &&
+          totalEquityRaw !== undefined &&
+          approximately(totalEquityRaw, balance + totalPnlVal)
+        ) {
+          // 按你的语义：balance 已包含 total_pnl，此时应以 balance 作为真实净值
+          actualEquity = balance
+        }
+        if (actualEquity === undefined) {
+          actualEquity = balance ?? 0
+        }
+
+        // 计算盈亏百分比：以固定基准 initial_balance
         const baseline = traderInitialCapital[trader.trader_id]
         let pnlPct = 0
         if (baseline > 0) {
-          // 使用 total_pnl / baseline 更直接；若后端重置则趋势仍反映增长（重置后会下降到接近0）
-          const totalPnl = point.total_pnl ?? ((point.total_equity ?? 0) - baseline)
+          const totalPnl = totalPnlVal ?? (actualEquity - baseline)
           pnlPct = (totalPnl / baseline) * 100
         }
 
         timestampMap.get(ts)!.traders.set(trader.trader_id, {
           pnl_pct: pnlPct,
-          equity: point.total_equity,
+          equity: actualEquity,
         })
       })
     })
