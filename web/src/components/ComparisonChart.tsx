@@ -77,6 +77,24 @@ export function ComparisonChart({ traders }: ComparisonChartProps) {
       }
     >()
 
+    // 基准初始资金（每个交易员使用其历史中第一条记录的初始资金）
+    // 目的：避免因为后端可能重置 total_pnl / balance 导致百分比跳动，统一以最早资金作为增长参考
+    const traderInitialCapital: Record<string, number> = {}
+
+    traderHistories.forEach((history, index) => {
+      const trader = traders[index]
+      if (!history.data || history.data.length === 0) return
+      const firstPoint: any = history.data[0]
+      // 旧逻辑初始资金推导：balance - total_pnl
+      let initialCapital = firstPoint.balance - firstPoint.total_pnl
+      // 兜底：若计算结果 <= 0，尝试使用 balance 或 total_equity 的较小值，避免异常/除零
+      if (!(initialCapital > 0)) {
+        if (firstPoint.balance > 0) initialCapital = firstPoint.balance
+        else if (firstPoint.total_equity > 0) initialCapital = firstPoint.total_equity
+      }
+      traderInitialCapital[trader.trader_id] = initialCapital > 0 ? initialCapital : 1 // 最终兜底=1防止除0
+    })
+
     traderHistories.forEach((history, index) => {
       const trader = traders[index]
       if (!history.data) return
@@ -101,10 +119,15 @@ export function ComparisonChart({ traders }: ComparisonChartProps) {
         }
 
         // 计算盈亏百分比：从total_pnl和balance计算
-        // 假设初始余额 = balance - total_pnl
-        const initialBalance = point.balance - point.total_pnl
-        const pnlPct =
-          initialBalance > 0 ? (point.total_pnl / initialBalance) * 100 : 0
+        // 新逻辑：固定基准 = 该交易员最早一条记录推导出的初始资金
+        // 使用 total_equity 与固定初始资金比较，体现整体净值增长百分比
+        const baseline = traderInitialCapital[trader.trader_id]
+        let pnlPct = 0
+        if (baseline > 0) {
+          // 如果 total_pnl 是自初始起的累计值，则 (total_pnl / baseline) * 100 与 (total_equity - baseline)/baseline *100 等价
+          // 为避免后端可能在某些情况下重置 total_pnl，采用净值差方式更稳健：
+          pnlPct = ((point.total_equity ?? 0) - baseline) / baseline * 100
+        }
 
         timestampMap.get(ts)!.traders.set(trader.trader_id, {
           pnl_pct: pnlPct,
