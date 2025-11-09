@@ -12,7 +12,7 @@ import {
 } from 'recharts'
 import useSWR from 'swr'
 import { api } from '../lib/api'
-import type { CompetitionTraderData } from '../types'
+import type { CompetitionTraderData, TraderInfo } from '../types'
 import { getTraderColor } from '../utils/traderColors'
 import { useLanguage } from '../contexts/LanguageContext'
 import { t } from '../i18n/translations'
@@ -24,6 +24,35 @@ interface ComparisonChartProps {
 
 export function ComparisonChart({ traders }: ComparisonChartProps) {
   const { language } = useLanguage()
+  // 获取用户交易员初始余额（若未登录或无权限则返回 null 并回退推断法）
+  const { data: myTraders } = useSWR<TraderInfo[] | null>(
+    'my-traders-initial-balances',
+    async () => {
+      try {
+        const list = await api.getTraders()
+        return list
+      } catch (e) {
+        return null
+      }
+    },
+    {
+      refreshInterval: 60_000,
+      revalidateOnFocus: false,
+      dedupingInterval: 30_000,
+    }
+  )
+
+  const initialBalanceMap = useMemo(() => {
+    const map = new Map<string, number>()
+    if (myTraders) {
+      myTraders.forEach((t) => {
+        if (typeof t.initial_balance === 'number' && t.initial_balance > 0) {
+          map.set(t.trader_id, t.initial_balance)
+        }
+      })
+    }
+    return map
+  }, [myTraders])
   // 获取所有trader的历史数据 - 使用单个useSWR并发请求所有trader数据
   // 生成唯一的key，当traders变化时会触发重新请求
   const tradersKey = traders
@@ -77,22 +106,25 @@ export function ComparisonChart({ traders }: ComparisonChartProps) {
       }
     >()
 
-    // 基准初始资金（每个交易员使用其历史中第一条记录的初始资金）
-    // 目的：避免因为后端可能重置 total_pnl / balance 导致百分比跳动，统一以最早资金作为增长参考
-    const traderInitialCapital: Record<string, number> = {}
+  // 基准初始资金：优先使用 /my-traders 返回的 initial_balance；回退到第一条记录推断
+  const traderInitialCapital: Record<string, number> = {}
 
     traderHistories.forEach((history, index) => {
       const trader = traders[index]
       if (!history.data || history.data.length === 0) return
-      const firstPoint: any = history.data[0]
-      // 旧逻辑初始资金推导：balance - total_pnl
-      let initialCapital = firstPoint.balance - firstPoint.total_pnl
-      // 兜底：若计算结果 <= 0，尝试使用 balance 或 total_equity 的较小值，避免异常/除零
-      if (!(initialCapital > 0)) {
-        if (firstPoint.balance > 0) initialCapital = firstPoint.balance
-        else if (firstPoint.total_equity > 0) initialCapital = firstPoint.total_equity
+      // 直接取已知初始资金
+      const knownInitial = initialBalanceMap.get(trader.trader_id)
+      if (typeof knownInitial === 'number' && knownInitial > 0) {
+        traderInitialCapital[trader.trader_id] = knownInitial
+        return
       }
-      traderInitialCapital[trader.trader_id] = initialCapital > 0 ? initialCapital : 1 // 最终兜底=1防止除0
+      const firstPoint: any = history.data[0]
+      let inferred = firstPoint.balance - firstPoint.total_pnl
+      if (!(inferred > 0)) {
+        if (firstPoint.balance > 0) inferred = firstPoint.balance
+        else if (firstPoint.total_equity > 0) inferred = firstPoint.total_equity
+      }
+      traderInitialCapital[trader.trader_id] = inferred > 0 ? inferred : 1
     })
 
     traderHistories.forEach((history, index) => {
@@ -124,9 +156,9 @@ export function ComparisonChart({ traders }: ComparisonChartProps) {
         const baseline = traderInitialCapital[trader.trader_id]
         let pnlPct = 0
         if (baseline > 0) {
-          // 如果 total_pnl 是自初始起的累计值，则 (total_pnl / baseline) * 100 与 (total_equity - baseline)/baseline *100 等价
-          // 为避免后端可能在某些情况下重置 total_pnl，采用净值差方式更稳健：
-          pnlPct = ((point.total_equity ?? 0) - baseline) / baseline * 100
+          // 使用 total_pnl / baseline 更直接；若后端重置则趋势仍反映增长（重置后会下降到接近0）
+          const totalPnl = point.total_pnl ?? ((point.total_equity ?? 0) - baseline)
+          pnlPct = (totalPnl / baseline) * 100
         }
 
         timestampMap.get(ts)!.traders.set(trader.trader_id, {
@@ -165,7 +197,7 @@ export function ComparisonChart({ traders }: ComparisonChartProps) {
     }
 
     return combined
-  }, [allTraderHistories, traders])
+  }, [allTraderHistories, traders, initialBalanceMap])
 
   if (isLoading) {
     return (

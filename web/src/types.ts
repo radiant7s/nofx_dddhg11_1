@@ -94,6 +94,8 @@ export interface TraderInfo {
   custom_prompt?: string
   use_coin_pool?: boolean
   use_oi_top?: boolean
+  // 初始资金（来自 /my-traders 接口，用于准确计算收益率基准）
+  initial_balance?: number
 }
 
 export interface AIModel {
