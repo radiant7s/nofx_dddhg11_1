@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"nofx/config"
+	cconfig "nofx/config"
 	"nofx/decision"
 	"nofx/logger"
 	"nofx/market"
@@ -159,6 +159,34 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 			log.Printf("🤖 [%s] 使用DeepSeek AI (自定义URL: %s, 模型: %s)", config.Name, config.CustomAPIURL, config.CustomModelName)
 		} else {
 			log.Printf("🤖 [%s] 使用DeepSeek AI", config.Name)
+		}
+	}
+
+	// 设置密钥移除持久化回调：余额不足时自动更新数据库中的AI模型APIKey列表
+	if db, ok := database.(*cconfig.Database); ok {
+		mcpClient.PersistRemovedKey = func(provider mcp.Provider, removedKey string, remaining []string) error {
+			// 获取当前用户的所有AI模型，找到匹配的provider
+			models, err := db.GetAIModels(userID)
+			if err != nil {
+				return fmt.Errorf("获取AI模型列表失败: %w", err)
+			}
+			var target *cconfig.AIModelConfig
+			for _, m := range models {
+				if strings.EqualFold(m.Provider, string(provider)) {
+					target = m
+					break
+				}
+			}
+			if target == nil {
+				return fmt.Errorf("未找到provider=%s的AI模型配置，无法持久化移除的密钥", provider)
+			}
+			// 更新数据库：用剩余密钥按逗号拼接写回
+			updatedKeys := strings.Join(remaining, ",")
+			if err := db.UpdateAIModel(userID, target.ID, target.Enabled, updatedKeys, target.CustomAPIURL, target.CustomModelName); err != nil {
+				return fmt.Errorf("更新AI模型密钥失败: %w", err)
+			}
+			log.Printf("💾 [%s] Provider=%s 已移除一个失效密钥，剩余=%d", config.Name, provider, len(remaining))
+			return nil
 		}
 	}
 
@@ -565,22 +593,22 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	currentPositionKeys := make(map[string]bool)
 
 	// 从配置数据库读取开仓时保存的止损触发条件与开仓决策JSON（如果可用）
-	var stopLossMap map[string][]config.PositionStopLossInfo
-	var openRecordMap map[string][]config.PositionOpenRecord
-	if dbObj, ok := at.database.(*config.Database); ok {
+	var stopLossMap map[string][]cconfig.PositionStopLossInfo
+	var openRecordMap map[string][]cconfig.PositionOpenRecord
+	if dbObj, ok := at.database.(*cconfig.Database); ok {
 		if m, err := dbObj.GetOpenPositionStopLosses(); err == nil {
 			stopLossMap = m
 		} else {
-			stopLossMap = map[string][]config.PositionStopLossInfo{}
+			stopLossMap = map[string][]cconfig.PositionStopLossInfo{}
 		}
 		if m2, err := dbObj.GetOpenPositionOpenRecords(); err == nil {
 			openRecordMap = m2
 		} else {
-			openRecordMap = map[string][]config.PositionOpenRecord{}
+			openRecordMap = map[string][]cconfig.PositionOpenRecord{}
 		}
 	} else {
-		stopLossMap = map[string][]config.PositionStopLossInfo{}
-		openRecordMap = map[string][]config.PositionOpenRecord{}
+		stopLossMap = map[string][]cconfig.PositionStopLossInfo{}
+		openRecordMap = map[string][]cconfig.PositionOpenRecord{}
 	}
 
 	for _, pos := range positions {
@@ -633,7 +661,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		pk := symbol + "_" + strings.ToLower(side)
 		if orecs, ok := openRecordMap[pk]; ok && len(orecs) > 0 {
 			// 选取当前 trader 的最新开仓记录
-			var best *config.PositionOpenRecord
+			var best *cconfig.PositionOpenRecord
 			for i := range orecs {
 				r := orecs[i]
 				if r.TraderID != at.id {
@@ -666,8 +694,8 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		if stopCond == "" {
 			tol := int64(5000) // 容差 5 秒（毫秒）
 			if recs, ok := stopLossMap[pk]; ok && len(recs) > 0 {
-				var bestForTrader *config.PositionStopLossInfo
-				var bestOverall *config.PositionStopLossInfo
+				var bestForTrader *cconfig.PositionStopLossInfo
+				var bestOverall *cconfig.PositionStopLossInfo
 				for i := range recs {
 					r := recs[i]
 					if bestOverall == nil || r.OpenTime > bestOverall.OpenTime {
@@ -883,7 +911,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	}
 
 	// 保存开仓时的止损触发条件与完整执行决策JSON到配置数据库（仅在有可用数据库时）
-	if dbObj, ok := at.database.(*config.Database); ok {
+	if dbObj, ok := at.database.(*cconfig.Database); ok {
 		// 1) 仅在提供了条件时保存止损条件文本（与价格独立）
 		if strings.TrimSpace(decision.StopLossCondition) != "" {
 			if err := dbObj.SavePositionStopLoss(decision.Symbol, "long", at.id, decision.StopLossCondition); err != nil {
@@ -994,7 +1022,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	}
 
 	// 保存开仓时的止损触发条件与完整执行决策JSON到配置数据库
-	if dbObj, ok := at.database.(*config.Database); ok {
+	if dbObj, ok := at.database.(*cconfig.Database); ok {
 		// 1) 仅在提供了条件时保存止损条件文本（与价格独立）
 		if strings.TrimSpace(decision.StopLossCondition) != "" {
 			if err := dbObj.SavePositionStopLoss(decision.Symbol, "short", at.id, decision.StopLossCondition); err != nil {
@@ -1050,7 +1078,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 	log.Printf("  ✓ 平仓成功")
 
 	// 删除数据库中保存的止损条件（持仓已平）——标记为 closed，按当前 trader id
-	if dbObj, ok := at.database.(*config.Database); ok {
+	if dbObj, ok := at.database.(*cconfig.Database); ok {
 		if err := dbObj.DeletePositionStopLoss(decision.Symbol, "long", at.id); err != nil {
 			log.Printf("  ⚠ 删除config.db中止损条件失败: %v", err)
 		}
@@ -1083,7 +1111,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
 	log.Printf("  ✓ 平仓成功")
 
 	// 删除数据库中保存的止损条件（持仓已平）——标记为 closed，按当前 trader id
-	if dbObj, ok := at.database.(*config.Database); ok {
+	if dbObj, ok := at.database.(*cconfig.Database); ok {
 		if err := dbObj.DeletePositionStopLoss(decision.Symbol, "short", at.id); err != nil {
 			log.Printf("  ⚠ 删除config.db中止损条件失败: %v", err)
 		}

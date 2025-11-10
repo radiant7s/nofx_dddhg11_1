@@ -28,11 +28,14 @@ const (
 type Client struct {
 	Provider   Provider
 	APIKey     string
+	APIKeys    []string // 支持多密钥；启动时随机选择一个
 	BaseURL    string
 	Model      string
 	Timeout    time.Duration
 	UseFullURL bool // 是否使用完整URL（不添加/chat/completions）
 	MaxTokens  int  // AI响应的最大token数
+	// PersistRemovedKey 当某个密钥被判定余额不足而移除时回调，负责持久化到数据库
+	PersistRemovedKey func(provider Provider, removedKey string, remaining []string) error
 	// 如果后续需要缓存余额，可在这里加一个字段，例如 lastBalance string / lastBalanceAt time.Time
 }
 
@@ -62,7 +65,7 @@ func New() *Client {
 // customURL 为空时使用默认URL，customModel 为空时使用默认模型
 func (client *Client) SetDeepSeekAPIKey(apiKey string, customURL string, customModel string) {
 	client.Provider = ProviderDeepSeek
-	client.APIKey = apiKey
+	client.setAPIKeysFromString(apiKey)
 	if customURL != "" {
 		client.BaseURL = customURL
 		log.Printf("🔧 [MCP] DeepSeek 使用自定义 BaseURL: %s", customURL)
@@ -77,17 +80,14 @@ func (client *Client) SetDeepSeekAPIKey(apiKey string, customURL string, customM
 		client.Model = "deepseek-chat"
 		log.Printf("🔧 [MCP] DeepSeek 使用默认 Model: %s", client.Model)
 	}
-	// 打印 API Key 的前后各4位用于验证
-	if len(apiKey) > 8 {
-		log.Printf("🔧 [MCP] DeepSeek API Key: %s...%s", apiKey[:4], apiKey[len(apiKey)-4:])
-	}
+	client.logActiveKey("DeepSeek")
 }
 
 // SetQwenAPIKey 设置阿里云Qwen API密钥
 // customURL 为空时使用默认URL，customModel 为空时使用默认模型
 func (client *Client) SetQwenAPIKey(apiKey string, customURL string, customModel string) {
 	client.Provider = ProviderQwen
-	client.APIKey = apiKey
+	client.setAPIKeysFromString(apiKey)
 	if customURL != "" {
 		client.BaseURL = customURL
 		log.Printf("🔧 [MCP] Qwen 使用自定义 BaseURL: %s", customURL)
@@ -102,16 +102,13 @@ func (client *Client) SetQwenAPIKey(apiKey string, customURL string, customModel
 		client.Model = "qwen3-max"
 		log.Printf("🔧 [MCP] Qwen 使用默认 Model: %s", client.Model)
 	}
-	// 打印 API Key 的前后各4位用于验证
-	if len(apiKey) > 8 {
-		log.Printf("🔧 [MCP] Qwen API Key: %s...%s", apiKey[:4], apiKey[len(apiKey)-4:])
-	}
+	client.logActiveKey("Qwen")
 }
 
 // SetCustomAPI 设置自定义OpenAI兼容API
 func (client *Client) SetCustomAPI(apiURL, apiKey, modelName string) {
 	client.Provider = ProviderCustom
-	client.APIKey = apiKey
+	client.setAPIKeysFromString(apiKey)
 
 	// 检查URL是否以#结尾，如果是则使用完整URL（不添加/chat/completions）
 	if strings.HasSuffix(apiURL, "#") {
@@ -139,43 +136,17 @@ func (client *Client) CallWithMessages(systemPrompt, userPrompt string) (string,
 	if client.APIKey == "" {
 		return "", fmt.Errorf("AI API密钥未设置，请先调用 SetDeepSeekAPIKey() 或 SetQwenAPIKey()")
 	}
-
-	// 重试配置
-	maxRetries := 3
-	var lastErr error
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if attempt > 1 {
-			fmt.Printf("⚠️  AI API调用失败，正在重试 (%d/%d)...\n", attempt, maxRetries)
-		}
-
-		result, err := client.callOnce(systemPrompt, userPrompt)
-		if err == nil {
-			if attempt > 1 {
-				fmt.Printf("✓ AI API重试成功\n")
-			}
-			return result, nil
-		}
-
-		lastErr = err
-		// 如果不是网络错误，不重试
-		if !isRetryableError(err) {
-			return "", err
-		}
-
-		// 重试前等待
-		if attempt < maxRetries {
-			waitTime := time.Duration(attempt) * 2 * time.Second
-			fmt.Printf("⏳ 等待%v后重试...\n", waitTime)
-			time.Sleep(waitTime)
-		}
-	}
-
-	return "", fmt.Errorf("重试%d次后仍然失败: %w", maxRetries, lastErr)
+	// 按需求：报错后不再重试（行情可能已变化）
+	return client.callOnce(systemPrompt, userPrompt)
 }
 
 // callOnce 单次调用AI API（内部使用）
 func (client *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
+	// 如果没有激活key，但有候选列表，则随机选择一个
+	if len(client.APIKeys) > 0 { // 每次调用前都随机挑选一个，满足“每次调用随机使用其中一个”
+		client.selectRandomKey()
+	}
+
 	// 打印当前 AI 配置
 	log.Printf("📡 [MCP] AI 请求配置:")
 	log.Printf("   Provider: %s", client.Provider)
@@ -273,7 +244,15 @@ func (client *Client) callOnce(systemPrompt, userPrompt string) (string, error) 
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("API返回错误 (status %d): %s", resp.StatusCode, string(body))
+		// 余额不足处理：删除当前key，不再重试
+		bodyStr := string(body)
+		if isInsufficientBalance(bodyStr) {
+			removed := client.removeCurrentKey()
+			if removed != "" {
+				log.Printf("🧹 [MCP] 检测到余额不足，已移除当前API Key: %s", maskAPIKey(removed))
+			}
+		}
+		return "", fmt.Errorf("API返回错误 (status %d): %s", resp.StatusCode, bodyStr)
 	}
 
 	// 解析响应
@@ -314,6 +293,102 @@ func isRetryableError(err error) bool {
 		if strings.Contains(errStr, retryable) {
 			return true
 		}
+	}
+	return false
+}
+
+// ---------------- 多Key 管理 ----------------
+
+// setAPIKeysFromString 支持逗号/分号/空白/换行分隔的多Key输入
+func (client *Client) setAPIKeysFromString(keys string) {
+	// 分割
+	sep := func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	}
+	parts := strings.FieldsFunc(strings.TrimSpace(keys), sep)
+	uniq := make(map[string]struct{})
+	client.APIKeys = client.APIKeys[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := uniq[p]; ok {
+			continue
+		}
+		uniq[p] = struct{}{}
+		client.APIKeys = append(client.APIKeys, p)
+	}
+
+	// 随机选择一个作为当前激活key（满足“每次启动随机使用其中的一个”）
+	if len(client.APIKeys) > 0 {
+		client.selectRandomKey()
+	} else {
+		client.APIKey = ""
+	}
+}
+
+// selectRandomKey 从列表中随机选一个作为当前key
+func (client *Client) selectRandomKey() {
+	if len(client.APIKeys) == 0 {
+		client.APIKey = ""
+		return
+	}
+	// 使用时间种子
+	rnd := time.Now().UnixNano()
+	idx := int(rnd % int64(len(client.APIKeys)))
+	client.APIKey = client.APIKeys[idx]
+}
+
+// removeCurrentKey 将当前key从候选列表删除，并清空当前key
+func (client *Client) removeCurrentKey() string {
+	if client.APIKey == "" {
+		return ""
+	}
+	removed := client.APIKey
+	// 过滤掉当前key
+	filtered := make([]string, 0, len(client.APIKeys))
+	for _, k := range client.APIKeys {
+		if k != removed {
+			filtered = append(filtered, k)
+		}
+	}
+	client.APIKeys = filtered
+	client.APIKey = ""
+	// 如果还有剩余key，随机切换一个供后续使用
+	if len(client.APIKeys) > 0 {
+		client.selectRandomKey()
+		client.logActiveKey("切换")
+	}
+	// 持久化回调（从外部写回数据库）
+	if client.PersistRemovedKey != nil {
+		if err := client.PersistRemovedKey(client.Provider, removed, client.APIKeys); err != nil {
+			log.Printf("⚠️  [MCP] 持久化移除API Key失败: %v", err)
+		} else {
+			log.Printf("📝 [MCP] 已持久化移除的API Key，剩余数量=%d", len(client.APIKeys))
+		}
+	}
+	return removed
+}
+
+// logActiveKey 打印当前激活的key（脱敏）
+func (client *Client) logActiveKey(prefix string) {
+	if len(client.APIKey) > 8 {
+		log.Printf("🔧 [MCP] %s API Key: %s", prefix, maskAPIKey(client.APIKey))
+	}
+}
+
+// isInsufficientBalance 判断响应文本是否为余额不足
+func isInsufficientBalance(s string) bool {
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "balance is insufficient") || strings.Contains(lower, "insufficient balance") {
+		return true
+	}
+	if strings.Contains(s, "余额不足") {
+		return true
+	}
+	if strings.Contains(s, "Sorry, your account balance is insufficient") {
+		return true
 	}
 	return false
 }
