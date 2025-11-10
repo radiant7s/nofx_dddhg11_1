@@ -2,12 +2,15 @@ package mcp
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/httptrace"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +52,10 @@ func New() *Client {
 		} else {
 			log.Printf("⚠️  [MCP] 环境变量 AI_MAX_TOKENS 无效 (%s)，使用默认值: %d", envMaxTokens, maxTokens)
 		}
+	}
+	// 调试开关提示
+	if debugHTTPEnabled() {
+		log.Printf("🪵 [MCP] HTTP 调试已启用 (MCP_DEBUG_HTTP=on)")
 	}
 
 	// 默认配置
@@ -198,6 +205,15 @@ func (client *Client) callOnce(systemPrompt, userPrompt string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("序列化请求失败: %w", err)
 	}
+	if debugHTTPEnabled() {
+		// 尝试美化打印请求体（截断以避免过长日志）
+		var pretty bytes.Buffer
+		if err := json.Indent(&pretty, jsonData, "", "  "); err == nil {
+			log.Printf("📝 [MCP][REQ-BODY] %s", truncateString(pretty.String(), 4000))
+		} else {
+			log.Printf("📝 [MCP][REQ-BODY-Raw] %s", truncateString(string(jsonData), 4000))
+		}
+	}
 
 	// 创建HTTP请求
 	var url string
@@ -216,6 +232,7 @@ func (client *Client) callOnce(systemPrompt, userPrompt string) (string, error) 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 
 	// 根据不同的Provider设置认证方式
 	switch client.Provider {
@@ -229,10 +246,24 @@ func (client *Client) callOnce(systemPrompt, userPrompt string) (string, error) 
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", client.APIKey))
 	}
 
+	if debugHTTPEnabled() {
+		// 附加 httptrace（可选）
+		req = attachClientTrace(req, "ChatCompletions")
+		// 打印完整请求头与体
+		logFullRequest("[MCP][REQ]", req, jsonData, shouldMaskAuth())
+	}
+
 	// 发送请求
-	httpClient := &http.Client{Timeout: client.Timeout}
+	httpClient := newHTTPClient(client.Timeout)
+	t0 := time.Now()
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		if debugHTTPEnabled() {
+			log.Printf("❌ [MCP][DO] 请求发送失败: %v", err)
+			if strings.Contains(strings.ToLower(err.Error()), "eof") {
+				log.Printf("🧪 [MCP][HINT] 检测到 EOF，可尝试设置 MCP_HTTP2=off 以禁用HTTP/2，或开启 MCP_DEBUG_TRACE=on 查看握手/连接细节")
+			}
+		}
 		return "", fmt.Errorf("发送请求失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -241,6 +272,10 @@ func (client *Client) callOnce(systemPrompt, userPrompt string) (string, error) 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("读取响应失败: %w", err)
+	}
+	if debugHTTPEnabled() {
+		dur := time.Since(t0)
+		logFullResponse("[MCP][RESP]", resp, body, dur)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -320,6 +355,17 @@ func (client *Client) setAPIKeysFromString(keys string) {
 		client.APIKeys = append(client.APIKeys, p)
 	}
 
+	if debugHTTPEnabled() {
+		// 打印收集到的 key（脱敏）
+		masked := make([]string, 0, len(client.APIKeys))
+		for _, k := range client.APIKeys {
+			masked = append(masked, maskAPIKey(k))
+		}
+		log.Printf("🔑 [MCP] 收到 %d 个 API Key: %s", len(client.APIKeys), strings.Join(masked, ", "))
+	} else {
+		log.Printf("🔑 [MCP] 收到 %d 个 API Key", len(client.APIKeys))
+	}
+
 	// 随机选择一个作为当前激活key（满足“每次启动随机使用其中的一个”）
 	if len(client.APIKeys) > 0 {
 		client.selectRandomKey()
@@ -338,6 +384,9 @@ func (client *Client) selectRandomKey() {
 	rnd := time.Now().UnixNano()
 	idx := int(rnd % int64(len(client.APIKeys)))
 	client.APIKey = client.APIKeys[idx]
+	if debugHTTPEnabled() {
+		log.Printf("🎯 [MCP] 随机选择第 %d 个 Key: %s", idx, maskAPIKey(client.APIKey))
+	}
 }
 
 // removeCurrentKey 将当前key从候选列表删除，并清空当前key
@@ -431,9 +480,20 @@ func fetchSiliconFlowUserInfo(c *Client) (*siliconFlowUserInfo, string, error) {
 		return nil, maskedKey, fmt.Errorf("创建 SiliconFlow 用户信息请求失败: %w", err)
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.APIKey))
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	req.Header.Set("Accept", "application/json")
+	httpClient := newHTTPClient(10 * time.Second)
+	if debugHTTPEnabled() {
+		req = attachClientTrace(req, "UserInfo")
+		logFullRequest("[MCP][REQ]", req, nil, shouldMaskAuth())
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		if debugHTTPEnabled() {
+			log.Printf("❌ [MCP][DO] (UserInfo) 请求发送失败: %v", err)
+			if strings.Contains(strings.ToLower(err.Error()), "eof") {
+				log.Printf("🧪 [MCP][HINT] (UserInfo) 检测到 EOF，可尝试设置 MCP_HTTP2=off 以禁用HTTP/2，或开启 MCP_DEBUG_TRACE=on 查看握手/连接细节")
+			}
+		}
 		return nil, maskedKey, fmt.Errorf("发送 SiliconFlow 用户信息请求失败: %w", err)
 	}
 	defer resp.Body.Close()
@@ -442,6 +502,9 @@ func fetchSiliconFlowUserInfo(c *Client) (*siliconFlowUserInfo, string, error) {
 		return nil, maskedKey, fmt.Errorf("读取 SiliconFlow 用户信息响应失败: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if debugHTTPEnabled() {
+			logFullResponse("[MCP][RESP] (UserInfo)", resp, body, 0)
+		}
 		return nil, maskedKey, fmt.Errorf("SiliconFlow 用户信息接口返回非200: %d %s", resp.StatusCode, string(body))
 	}
 	var info siliconFlowUserInfo
@@ -463,4 +526,158 @@ func maskAPIKey(key string) string {
 		return "****"
 	}
 	return key[:4] + "..." + key[len(key)-4:]
+}
+
+// debugHTTPEnabled 判断是否启用 HTTP 级别的详细调试日志
+func debugHTTPEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("MCP_DEBUG_HTTP")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+// truncateString 对字符串进行安全截断
+func truncateString(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	// 尝试按 rune 截断以避免多字节拆分
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…(truncated)"
+}
+
+// ---------------- 高级调试/网络控制工具 ----------------
+
+// newHTTPClient 创建带可选 HTTP/2 禁用与合理 TLS 的客户端
+func newHTTPClient(timeout time.Duration) *http.Client {
+	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	// 如需彻底禁用 HTTP/2
+	if http2Disabled() {
+		tr.ForceAttemptHTTP2 = false
+		// 通过将 TLSNextProto 置空来避免 http2 自动协商
+		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	}
+	return &http.Client{Timeout: timeout, Transport: tr}
+}
+
+// attachClientTrace 可选附加 httptrace 以记录网络阶段
+func attachClientTrace(req *http.Request, label string) *http.Request {
+	if !debugTraceEnabled() {
+		return req
+	}
+	ct := &httptrace.ClientTrace{
+		DNSStart: func(info httptrace.DNSStartInfo) { log.Printf("🔍 %s DNSStart: %s", label, info.Host) },
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			log.Printf("🔍 %s DNSDone: addrs=%v err=%v", label, info.Addrs, info.Err)
+		},
+		ConnectStart: func(network, addr string) { log.Printf("🔌 %s ConnectStart: %s %s", label, network, addr) },
+		ConnectDone: func(network, addr string, err error) {
+			log.Printf("🔌 %s ConnectDone: %s %s err=%v", label, network, addr, err)
+		},
+		TLSHandshakeStart: func() { log.Printf("🤝 %s TLSHandshakeStart", label) },
+		TLSHandshakeDone: func(cs tls.ConnectionState, err error) {
+			log.Printf("🤝 %s TLSHandshakeDone: vers=%x cipher=%x err=%v", label, cs.Version, cs.CipherSuite, err)
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			log.Printf("🔁 %s GotConn: reused=%v idle=%v", label, info.Reused, info.WasIdle)
+		},
+		WroteHeaders:         func() { log.Printf("✉️  %s WroteHeaders", label) },
+		GotFirstResponseByte: func() { log.Printf("📬 %s GotFirstResponseByte", label) },
+	}
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), ct))
+}
+
+// 日志：完整请求（含头/体）
+func logFullRequest(prefix string, req *http.Request, body []byte, maskAuth bool) {
+	log.Printf("🧾 %s %s %s", prefix, req.Method, req.URL.String())
+	// 按键名排序，方便阅读
+	keys := make([]string, 0, len(req.Header))
+	for k := range req.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		vals := req.Header[k]
+		for _, v := range vals {
+			line := v
+			if maskAuth && strings.EqualFold(k, "Authorization") {
+				line = maskBearer(v)
+			}
+			log.Printf("🧾 %s Header: %s: %s", prefix, k, line)
+		}
+	}
+	if body != nil {
+		s := string(body)
+		if !debugNoTruncateEnabled() {
+			s = truncateString(s, 100000)
+		}
+		log.Printf("📝 %s BODY: %s", prefix, s)
+	}
+}
+
+// 日志：完整响应（含头/体）
+func logFullResponse(prefix string, resp *http.Response, body []byte, dur time.Duration) {
+	proto := resp.Proto
+	log.Printf("📨 %s Status=%d Proto=%s Duration=%s", prefix, resp.StatusCode, proto, dur)
+	// 响应头
+	keys := make([]string, 0, len(resp.Header))
+	for k := range resp.Header {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, v := range resp.Header[k] {
+			log.Printf("📨 %s Header: %s: %s", prefix, k, v)
+		}
+	}
+	// 响应体
+	s := string(body)
+	if !debugNoTruncateEnabled() {
+		s = truncateString(s, 100000)
+	}
+	log.Printf("📨 %s BODY: %s", prefix, s)
+}
+
+func http2Disabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("MCP_HTTP2")))
+	return v == "off" || v == "0" || v == "false" || v == "no"
+}
+
+func debugTraceEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("MCP_DEBUG_TRACE")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func debugNoTruncateEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("MCP_DEBUG_NO_TRUNCATE")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func debugExposeAuthEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv("MCP_DEBUG_EXPOSE_AUTH")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
+func shouldMaskAuth() bool { return !debugExposeAuthEnabled() }
+
+// 将 "Bearer sk-xxx" 脱敏
+func maskBearer(v string) string {
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(v)), "bearer ") {
+		return v
+	}
+	parts := strings.SplitN(v, " ", 2)
+	if len(parts) != 2 {
+		return v
+	}
+	return parts[0] + " " + maskAPIKey(parts[1])
 }
