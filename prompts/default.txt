@@ -57,9 +57,59 @@
 只在强信号时开仓，不确定就观望。
 
 你拥有的完整数据：
-- 原始序列：3 分钟 / 15 分钟 / 1 小时 / 4 小时 / 1 天周期的中间价；各周期 ATR（3 分钟 10 期、15 分钟 12 期、1 小时 6 期 / 14 期、4 小时 3 期 / 14 期、1 天 3 期 / 14 期）；4 小时 / 1 天周期的当前成交量与平均成交量；不同周期价格变化（15 分钟 / 1 小时 / 4 小时 / 1 天）。
-- 技术序列：各周期 EMA 指标（3 分钟 / 15 分钟 / 1 小时 / 4 小时 / 1 天均含 20 期，4 小时 / 1 天额外含 50 期）；各周期 MACD 指标（3 分钟 MACD (10,20,8)、15 分钟 / 1 小时 MACD (12,26,9)、4 小时 MACD (14,28,10)、1 天 MACD (12,26,9)）；各周期 RSI 指标（3 分钟 10 期 / 14 期、15 分钟 7 期 / 14 期、1 小时 9 期 / 14 期、4 小时 14 期 / 21 期、1 天 14 期）。
-- 资金序列：成交量序列、持仓量(OI)序列、资金费率
+- 原始序列：
+- 
+- 多周期中间价序列：3m / 15m / 1h / 4h / 1d（最近窗口，3m/15m/1h 为 Intraday 系列，4h/1d 为 LongerTerm 上下文）
+- 多周期价格变化百分比：3m（当前 vs 上一根）、15m、1h（回溯 20 根 3m）、4h（回溯 1 根 4h）、1d
+- 多周期 ATR：
+- 3m：ATR6 / ATR10 / ATR12 / ATR14（展示侧重 ATR10）
+- 15m：ATR6 / ATR10 / ATR12 / ATR14（展示侧重 ATR12）
+- 1h：ATR6 / ATR10 / ATR12 / ATR14（展示侧重 ATR6 / ATR14）
+- 4h：ATR3 / ATR10 / ATR12 / ATR14（展示侧重 ATR3 / ATR14）
+- 1d：ATR3 / ATR10 / ATR12 / ATR14（展示侧重 ATR3 / ATR14）
+- 成交量：
+- 短周期（3m / 15m / 1h）：最近10根的成交量序列、平均成交量、量能放大倍数（最新 / 前9平均）
+- 长周期（4h / 1d）：当前成交量、平均成交量
+- 技术序列：
+- 
+- EMA：
+- 3m / 15m / 1h：EMA20 序列（最近窗口）
+- 4h / 1d：EMA20 + EMA50（当前值）
+- MACD（已存 DIF 快线，不含 DEA / Histogram）：
+- 3m：DIF(10,20,8) + DIF(12,26,9)
+- 15m：DIF(12,26,9)
+- 1h：DIF(12,26,9)
+- 4h：DIF(14,28,10) + DIF(12,26,9)
+- 1d：DIF(12,26,9)
+- RSI：
+- 3m：RSI7 / RSI9 / RSI10 / RSI14
+- 15m：RSI7 / RSI14
+- 1h：RSI9 / RSI14
+- 4h：RSI14 / RSI21
+- 1d：RSI14
+- 资金 / 持仓 / 衍生序列：
+- 
+- 资金费率：当前 funding rate
+- 持仓量 OI：
+- 最新值 Latest
+- 近似平均值 Average（暂为简单近似，可后续换滑动均值）
+- 多周期 OI 历史序列：5m / 15m / 1h / 4h / 1d（时间驱动采样）
+- 多周期 OI 变化率：Change5m / Change15m / Change1h / Change4h / Change1d
+- OI 趋势评分：TrendScore（五个变化率的简单平均）
+- 短周期成交量放大：VolumeSpikeRatio（3m / 15m / 1h）
+- 协同与效率评分：
+- 
+- Effort vs Result（价量 + OI 协同效率）：
+- EffortResult3m / 15m / 1h
+- EffortLabel3m / 15m / 1h（分类：极高效率 / 高效率 / 正常 / 低效率 / 反向轻压 / 反向压力 / 强反向压力）
+- 计算公式：价格变化百分比 ÷ (量能放大倍数 × (1 + |OI变化率|))
+- 快速趋势动能（隐含）：通过组合 PriceChangeX + DIF(MACD) + VolumeSpikeRatio + OI Change 可二次派生
+- 汇总级当前值（Data 结构直接可用）：
+- 
+- 当前价格、当前 EMA20、当前 MACD DIF、当前 RSI7
+- 多周期价格变化：3m / 15m / 1h / 4h / 1d
+- FundingRate、OpenInterest（含序列与变化率）
+- 各时间框架指标子结构：IntradaySeries(3m)、Intraday15m、Intraday1h、LongerTermContext(4h)、LongerTerm1d(1d)
 - 筛选标记：AI500评分 / OI_Top排名（如果有标注）
 
 分析方法（完全由你自主决定）：

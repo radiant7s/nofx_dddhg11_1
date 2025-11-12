@@ -4,67 +4,97 @@ import "time"
 
 // Data 市场数据结构
 type Data struct {
-    Symbol            string
-    CurrentPrice      float64
-    PriceChange1h     float64 // 1小时价格变化百分比
-    PriceChange4h     float64 // 4小时价格变化百分比
-    PriceChange15m    float64 // 新增：15分钟价格变化百分比
-    PriceChange1d     float64 // 新增：1天价格变化百分比
-    CurrentEMA20      float64
-    CurrentMACD       float64
-    CurrentRSI7       float64
-    OpenInterest      *OIData
-    FundingRate       float64
-    IntradaySeries    *IntradayData  // 3分钟数据
-    Intraday15m       *IntradayData  // 新增：15分钟数据
-    Intraday1h        *IntradayData  // 新增：1小时数据
-    LongerTermContext *LongerTermData // 4小时数据
-    LongerTerm1d      *LongerTermData // 新增：1天数据
-}
+	Symbol            string
+	CurrentPrice      float64
+	PriceChange3m     float64 // 新增：最近一个3m与前一个3m的价格变化百分比
+	PriceChange1h     float64 // 1小时价格变化百分比
+	PriceChange4h     float64 // 4小时价格变化百分比
+	PriceChange15m    float64 // 新增：15分钟价格变化百分比
+	PriceChange1d     float64 // 新增：1天价格变化百分比
+	CurrentEMA20      float64
+	CurrentMACD       float64
+	CurrentRSI7       float64
+	OpenInterest      *OIData
+	FundingRate       float64
+	IntradaySeries    *IntradayData   // 3分钟数据
+	Intraday15m       *IntradayData   // 新增：15分钟数据
+	Intraday1h        *IntradayData   // 新增：1小时数据
+	LongerTermContext *LongerTermData // 4小时数据
+	LongerTerm1d      *LongerTermData // 新增：1天数据
 
+	// Effort vs Result 指标 (价量 + OI 共振效率) 越高代表价格推进效率高
+	EffortResult3m  float64
+	EffortResult15m float64
+	EffortResult1h  float64
+	// 解释标签 (高效/低效/背离)，便于直接输出
+	EffortLabel3m  string
+	EffortLabel15m string
+	EffortLabel1h  string
+}
 
 // OIData Open Interest数据
 type OIData struct {
 	Latest  float64
 	Average float64
+	// 历史序列（不同周期）
+	Series5m  []float64
+	Series15m []float64
+	Series1h  []float64
+	Series4h  []float64
+	Series1d  []float64
+
+	// 变化率（相邻最新两点的百分比变化）
+	Change5m  float64
+	Change15m float64
+	Change1h  float64
+	Change4h  float64
+	Change1d  float64
+
+	// 趋势评分（简单地取各周期变化率的平均，后续可替换为线性回归斜率加权）
+	TrendScore float64
 }
 
 // IntradayData 日内数据(3分钟,15,1小时)
 type IntradayData struct {
-	ATR6          float64
-	ATR10         float64
-	ATR12         float64
-	ATR14         float64
+	ATR6  float64
+	ATR10 float64
+	ATR12 float64
+	ATR14 float64
 
 	MidPrices   []float64
 	EMA20Values []float64
 
-	MACDValues10208  []float64
-	MACDValues12269  []float64
+	MACDValues10208 []float64
+	MACDValues12269 []float64
 
 	RSI7Values  []float64
 	RSI9Values  []float64
 	RSI10Values []float64
 	RSI14Values []float64
+
+	// 新增：成交量序列与量能指标
+	VolumeValues     []float64 // 最近10个点的成交量
+	VolumeAverage    float64   // 最近10个点平均成交量
+	VolumeSpikeRatio float64   // 最新成交量 / 之前N(默认为9)个平均成交量
 }
 
 // LongerTermData 长期数据(4小时时间框架1天)
 type LongerTermData struct {
-	EMA20         float64
-	EMA50         float64
+	EMA20 float64
+	EMA50 float64
 
-	ATR3          float64
-	ATR10         float64
-	ATR12         float64
-	ATR14         float64
+	ATR3  float64
+	ATR10 float64
+	ATR12 float64
+	ATR14 float64
 
 	CurrentVolume float64
 	AverageVolume float64
 
-	MACDValues142810    []float64
-	MACDValues12269    []float64
-	RSI14Values   []float64
-	RSI21Values   []float64
+	MACDValues142810 []float64
+	MACDValues12269  []float64
+	RSI14Values      []float64
+	RSI21Values      []float64
 }
 
 // Binance API 响应结构
