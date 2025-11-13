@@ -672,6 +672,38 @@ func validateDecisions(decisions []Decision, accountEquity float64, btcEthLevera
 
 		// 仅对开仓操作进行限幅处理 5x特化
 		if d.Action == "open_long" || d.Action == "open_short" {
+			// 杠杆限幅处理：根据币种类别限制在 [1, 配置上限]
+			maxLeverage := altcoinLeverage
+			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
+				maxLeverage = btcEthLeverage
+			}
+
+			// 下限矫正：AI 可能给出 0 或负数，自动矫正为 1x
+			if d.Leverage <= 0 {
+				oldLev := d.Leverage
+				d.Leverage = 1
+				levNote := fmt.Sprintf("（已自动限幅: 杠杆 %dx → %dx，最小为1x）", oldLev, d.Leverage)
+				if strings.TrimSpace(d.Reasoning) == "" {
+					d.Reasoning = levNote
+				} else if !strings.Contains(d.Reasoning, "已自动限幅: 杠杆") {
+					d.Reasoning = d.Reasoning + " " + levNote
+				}
+				log.Printf("[validateDecisions] 决策 #%d %s leverage 下限矫正: %dx -> %dx", i+1, d.Symbol, oldLev, d.Leverage)
+			}
+
+			// 上限限幅：超过配置上限时自动压到最大值
+			if d.Leverage > maxLeverage {
+				oldLev := d.Leverage
+				d.Leverage = maxLeverage
+				levNote := fmt.Sprintf("（已自动限幅: 杠杆 %dx → %dx，上限%dx）", oldLev, d.Leverage, maxLeverage)
+				if strings.TrimSpace(d.Reasoning) == "" {
+					d.Reasoning = levNote
+				} else if !strings.Contains(d.Reasoning, "已自动限幅: 杠杆") {
+					d.Reasoning = d.Reasoning + " " + levNote
+				}
+				log.Printf("[validateDecisions] 决策 #%d %s leverage 超限: %dx -> %dx (max %dx)", i+1, d.Symbol, oldLev, d.Leverage, maxLeverage)
+			}
+
 			maxPositionValue := accountEquity * 1.5 // 山寨币上限（调整为1.5x账户净值）
 			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
 				maxPositionValue = accountEquity * 5.0 // BTC/ETH上限（调整为5x账户净值）
