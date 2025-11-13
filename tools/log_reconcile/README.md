@@ -11,7 +11,6 @@ go run ./tools/log_reconcile -action scan-symbols
 # 2. 拉取订单 (需要币安 API 密钥)
 go run ./tools/log_reconcile -action fetch-orders -api_key YOUR_KEY -secret_key YOUR_SECRET
 
-go run ./tools/log_reconcile -action fetch-orders -api_key 4AT5WPXRn75A5KGD0JQtaSedLJqvtQH7QZUdYADYOjcwdjMNGJJtRQ19CEwbOHyF -secret_key ilOfx9iJE8CXSt2hcPBu9WVOuAqC12Y4fPrSI2hOFCKD4KUEKJ3JibWJ97ZFpy4W
 
 # 3. 执行对账
 go run ./tools/log_reconcile -action reconcile
