@@ -22,6 +22,7 @@ nofx_test
 Thumbs.db
 
 # 临时文件
+tools
 log/
 *.log
 *.tmp
