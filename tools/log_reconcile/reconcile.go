@@ -361,6 +361,7 @@ func reconcileLogs(db *sql.DB, decisionDir string) error {
 
 // loadOrdersGrouped 按 trader_id+symbol+position_side 分组订单（已按时间排序）
 func loadOrdersGrouped(db *sql.DB) (map[string][]BinanceOrder, error) {
+	// 读取订单缓存
 	rows, err := db.Query(`SELECT trader_id, symbol, order_id, side, position_side, status, avg_price, executed_qty, orig_qty, reduce_only, close_position, type, time, update_time, raw_json FROM orders`)
 	if err != nil {
 		return nil, err
@@ -368,6 +369,7 @@ func loadOrdersGrouped(db *sql.DB) (map[string][]BinanceOrder, error) {
 	defer rows.Close()
 	res := make(map[string][]BinanceOrder)
 	for rows.Next() {
+		// 重建部分字段
 		var o BinanceOrder
 		var traderID, symbol string
 		var avg, exec, orig float64
@@ -492,8 +494,13 @@ func reconcileTrader(dir string, traderID string, orders map[string][]BinanceOrd
 			continue
 		}
 		// 生成补全文件
+		// 如果是 reduceOnly 且非 closePosition，按业务语义更贴近 "partial_close"
+		actionName := closeActionName(openAct.Action)
+		if best.ReduceOnly && !best.ClosePosition {
+			actionName = "partial_close"
+		}
 		closeAction := DecisionAction{
-			Action:    closeActionName(openAct.Action),
+			Action:    actionName,
 			Symbol:    openAct.Symbol,
 			Quantity:  parseFloat(best.ExecutedQty),
 			Price:     safePrice(best),
@@ -677,10 +684,12 @@ func reconcileTrader(dir string, traderID string, orders map[string][]BinanceOrd
 						if !o.ReduceOnly {
 							continue
 						}
-						if strings.ToUpper(o.Status) != "FILLED" {
+						// 接受 FILLED，或 PARTIALLY_FILLED/CANCELED 但有成交数量的部分平仓
+						statusU := strings.ToUpper(o.Status)
+						qty := parseFloat(o.ExecutedQty)
+						if !(statusU == "FILLED" || ((statusU == "PARTIALLY_FILLED" || statusU == "CANCELED") && qty > 0)) {
 							continue
 						}
-						qty := parseFloat(o.ExecutedQty)
 						price := safePrice(&o)
 						if qty <= 0 || price <= 0 {
 							continue
@@ -957,3 +966,5 @@ func hmacSHA256Hex(data, secret string) string {
 // ===== 缺失 import 的补充 =====
 // 为保持结构清晰，这些放在文件末尾避免多次滚动
 // 已在顶部 import 所需包，无需重复
+
+// （reconcilePartialClose 的实现位于 partial_close_reconcile.go）
