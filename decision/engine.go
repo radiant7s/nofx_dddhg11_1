@@ -373,12 +373,13 @@ func buildUserPrompt(ctx *Context) string {
 		ctx.Account.MarginUsedPct,
 		ctx.Account.PositionCount))
 
-	// 🔧 小资金账户提醒
-	if ctx.Account.TotalEquity < 100 {
-		sb.WriteString("⚠️ **小资金账户模式**: BTC/ETH最小开仓25 USDT\n")
-	} else if ctx.Account.TotalEquity < 500 {
-		sb.WriteString("💡 **中等资金账户**: BTC/ETH最小开仓35 USDT\n")
-	}
+	// // 🔧 小资金账户提醒
+	// if ctx.Account.TotalEquity < 100 {
+	// 	sb.WriteString("⚠️ **小资金账户模式**: BTC/ETH最小开仓25 USDT\n")
+	// } else if ctx.Account.TotalEquity < 500 {
+	// 	sb.WriteString("💡 **中等资金账户**: BTC/ETH最小开仓35 USDT\n")
+	// }
+
 	sb.WriteString("\n")
 
 	// 持仓（完整市场数据）
