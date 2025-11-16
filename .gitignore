@@ -34,6 +34,8 @@ log/
 config.json
 config.db
 *.db
+*.db-shm
+*.db-wal
 
 # 决策日志
 decision_logs/

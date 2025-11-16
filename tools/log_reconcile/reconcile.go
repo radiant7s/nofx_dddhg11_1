@@ -279,7 +279,9 @@ func fetchOrdersFromConfigDB(reconcileDB *sql.DB, configDBPath, userID, exchange
  		SELECT t.id AS trader_id, e.api_key, e.secret_key
  		FROM traders t
  		JOIN exchanges e ON t.exchange_id = e.id AND t.user_id = e.user_id
- 		WHERE t.user_id = ? AND t.exchange_id = 'binance' AND COALESCE(e.api_key,'') <> '' AND COALESCE(e.secret_key,'') <> ''
+ 		WHERE t.user_id = ?
+ 		  AND (LOWER(e.id)='binance' OR LOWER(e.name) LIKE '%binance%' OR LOWER(e.type) IN ('binance','cex'))
+ 		  AND COALESCE(e.api_key,'') <> '' AND COALESCE(e.secret_key,'') <> ''
  		ORDER BY t.id
  	`, userID)
 	if err != nil {
@@ -342,83 +344,116 @@ func fetchOrdersFromConfigDB(reconcileDB *sql.DB, configDBPath, userID, exchange
 		// 回退：直接使用 exchanges 中的 binance 账户对所有已扫描的 trader_id 拉取
 		var exRows *sql.Rows
 		var errEx error
+		exs := make([]struct{ id, api, sec string }, 0)
 		if strings.TrimSpace(exchangeID) != "" {
 			exRows, errEx = cfgDB.Query(`SELECT id, api_key, secret_key FROM exchanges WHERE user_id = ? AND id = ? AND COALESCE(api_key,'')<>'' AND COALESCE(secret_key,'')<>''`, userID, exchangeID)
 		} else {
-			exRows, errEx = cfgDB.Query(`SELECT id, api_key, secret_key FROM exchanges WHERE user_id = ? AND type = 'binance' AND COALESCE(api_key,'')<>'' AND COALESCE(secret_key,'')<>'' ORDER BY id`, userID)
+			exRows, errEx = cfgDB.Query(`
+				SELECT id, api_key, secret_key FROM exchanges 
+				WHERE user_id = ? 
+				  AND (LOWER(id)='binance' OR LOWER(name) LIKE '%binance%' OR LOWER(type) IN ('binance','cex'))
+				  AND COALESCE(api_key,'')<>'' AND COALESCE(secret_key,'')<>''
+				ORDER BY id`, userID)
+			if errEx == nil {
+				// 若按指定 user_id 未找到，放宽为任意 user_id
+				hasAny := false
+				defer func() {
+					if !hasAny && exRows != nil {
+						_ = exRows.Close()
+					}
+				}()
+				tmpList := make([]struct{ id, api, sec string }, 0)
+				for exRows.Next() {
+					hasAny = true
+					var id, a, s string
+					_ = exRows.Scan(&id, &a, &s)
+					tmpList = append(tmpList, struct{ id, api, sec string }{id, a, s})
+				}
+				_ = exRows.Close()
+				if !hasAny {
+					log.Printf("ℹ 未在 user_id=%s 下找到 Binance 账户，尝试跨用户查找...", userID)
+					exRows, errEx = cfgDB.Query(`
+						SELECT id, api_key, secret_key FROM exchanges 
+						WHERE (LOWER(id)='binance' OR LOWER(name) LIKE '%binance%' OR LOWER(type) IN ('binance','cex'))
+						  AND COALESCE(api_key,'')<>'' AND COALESCE(secret_key,'')<>''
+						ORDER BY user_id, id`)
+				} else {
+					// 复用已读取的列表，避免重复游标遍历
+					for _, it := range tmpList {
+						exs = append(exs, it)
+					}
+					// 置 exRows 为 nil 表示已填充 exs
+					exRows = nil
+				}
+			}
 		}
 		if errEx != nil {
 			log.Printf("⚠ 查询交易所密钥失败: %v", errEx)
 			log.Printf("✅ 完成: 交易员=%d, 符号处理=%d, 错误=%d", foundTraders, processedSymbols, failedTasks)
 			return nil
 		}
-		defer exRows.Close()
-		exs := make([]struct{ id, api, sec string }, 0)
-		for exRows.Next() {
-			var id, a, s string
-			if err := exRows.Scan(&id, &a, &s); err == nil {
-				exs = append(exs, struct{ id, api, sec string }{id, a, s})
+		if exRows != nil {
+			defer exRows.Close()
+		}
+		if exRows != nil {
+			for exRows.Next() {
+				var id, a, s string
+				if err := exRows.Scan(&id, &a, &s); err == nil {
+					exs = append(exs, struct{ id, api, sec string }{id, a, s})
+				}
 			}
 		}
+		log.Printf("🔐 匹配到 Binance 账户数: %d", len(exs))
 		if len(exs) == 0 {
 			log.Printf("ℹ 未在 exchanges 找到可用的 Binance 密钥。请配置 api_key/secret_key 或在命令行指定 -exchange_id。")
 			log.Printf("✅ 完成: 交易员=%d, 符号处理=%d, 错误=%d", foundTraders, processedSymbols, failedTasks)
 			return nil
 		}
-		if strings.TrimSpace(exchangeID) == "" && len(exs) > 1 {
-			log.Printf("⚠ 检测到多个 Binance 账户: %d 个。为避免歧义，请使用 -exchange_id 指定一个（例如 -exchange_id %s）。", len(exs), exs[0].id)
-			log.Printf("✅ 完成: 交易员=%d, 符号处理=%d, 错误=%d", foundTraders, processedSymbols, failedTasks)
-			return nil
-		}
-		// 使用选定的 exchange
-		chosen := exs[0]
-		if strings.TrimSpace(exchangeID) != "" {
-			for _, ex := range exs {
-				if ex.id == exchangeID {
-					chosen = ex
-					break
-				}
-			}
-		}
-		log.Printf("↩ 回退使用交易所[%s]的密钥对所有已扫描交易员拉取", chosen.id)
-		// 获取已扫描的 trader_id 列表
-		idRows, err := reconcileDB.Query(`SELECT DISTINCT trader_id FROM symbols ORDER BY trader_id`)
-		if err != nil {
-			log.Printf("⚠ 读取已扫描的交易员列表失败: %v", err)
-			log.Printf("✅ 完成: 交易员=%d, 符号处理=%d, 错误=%d", foundTraders, processedSymbols, failedTasks)
-			return nil
-		}
-		defer idRows.Close()
-		client := newSignedClient(chosen.api, chosen.sec, base)
-		for idRows.Next() {
-			var traderID string
-			if err := idRows.Scan(&traderID); err != nil {
-				failedTasks++
+
+		// 如果未指定 exchange_id，则依次使用所有匹配的 Binance 账户逐个处理（有几条用几条）
+		for _, chosen := range exs {
+			if strings.TrimSpace(exchangeID) != "" && chosen.id != exchangeID {
 				continue
 			}
-			symRows, err := reconcileDB.Query(`SELECT symbol FROM symbols WHERE trader_id = ? ORDER BY symbol`, traderID)
+			log.Printf("↩ 回退使用交易所[%s]的密钥对所有已扫描交易员拉取", chosen.id)
+			// 获取已扫描的 trader_id 列表
+			idRows, err := reconcileDB.Query(`SELECT DISTINCT trader_id FROM symbols ORDER BY trader_id`)
 			if err != nil {
-				log.Printf("⚠ 读取交易员 %s 的符号失败: %v", traderID, err)
-				failedTasks++
+				log.Printf("⚠ 读取已扫描的交易员列表失败: %v", err)
 				continue
 			}
-			cnt := 0
-			for symRows.Next() {
-				var symbol string
-				if err := symRows.Scan(&symbol); err != nil {
+			client := newSignedClient(chosen.api, chosen.sec, base)
+			for idRows.Next() {
+				var traderID string
+				if err := idRows.Scan(&traderID); err != nil {
 					failedTasks++
 					continue
 				}
-				if err := fetchOrdersForSymbol(reconcileDB, client, traderID, symbol); err != nil {
-					log.Printf("⚠ 拉取 [%s] %s 失败: %v", traderID, symbol, err)
+				symRows, err := reconcileDB.Query(`SELECT symbol FROM symbols WHERE trader_id = ? ORDER BY symbol`, traderID)
+				if err != nil {
+					log.Printf("⚠ 读取交易员 %s 的符号失败: %v", traderID, err)
 					failedTasks++
+					continue
 				}
-				time.Sleep(interval)
-				processedSymbols++
-				cnt++
+				cnt := 0
+				for symRows.Next() {
+					var symbol string
+					if err := symRows.Scan(&symbol); err != nil {
+						failedTasks++
+						continue
+					}
+					if err := fetchOrdersForSymbol(reconcileDB, client, traderID, symbol); err != nil {
+						log.Printf("⚠ 拉取 [%s] %s 失败: %v", traderID, symbol, err)
+						failedTasks++
+					}
+					time.Sleep(interval)
+					processedSymbols++
+					cnt++
+				}
+				_ = symRows.Close()
+				log.Printf("⟲ 完成交易员 %s 的拉取（%d 个符号）@%s", traderID, cnt, chosen.id)
 			}
-			_ = symRows.Close()
-			log.Printf("⟲ 完成交易员 %s 的拉取（%d 个符号）", traderID, cnt)
+			_ = idRows.Close()
 		}
 	}
 

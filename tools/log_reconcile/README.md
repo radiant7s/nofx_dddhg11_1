@@ -8,17 +8,15 @@
 先扫描符号（必须先有符号，拉单才有目标）
 go run ./tools/log_reconcile -action scan-symbols
 按交易员从配置库拉单（新增了可见日志）
+# 单一Binance账户（或只有一条binance记录）:
 go run ./tools/log_reconcile -action fetch-orders-db -config_db config.db -user_id default -base fapi
+
+# 如存在多个Binance账户，指定 exchange_id（例如 'binance'）:
+go run ./tools/log_reconcile -action fetch-orders-db -config_db config.db -user_id default -base fapi -exchange_id binance
+
 对账
 go run ./tools/log_reconcile -action reconcile
-- `-action`: `scan-symbols` / `fetch-orders` / `fetch-orders-db` / `reconcile` / `partial-close-reconcile`
-- `-decision_dir`: 日志目录 (默认 `decision_logs`)
- - `-exchange_id`: 回退模式下指定要使用的交易所ID（当未找到绑定到交易员的密钥时，需手动指定），例如 `binance`
-
-单一密钥模式（旧方式，仅用于 `-action fetch-orders`）
-- `-api_key`: 币安 API Key
-
-从配置库读取（推荐，`-action fetch-orders-db`）
+```
 
 ## 功能
 
